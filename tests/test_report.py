@@ -3,6 +3,7 @@
 """
 
 import re
+import sys
 
 import pytest
 
@@ -46,6 +47,32 @@ class TestQualityReport:
         assert "- Line width:" not in evidence
         assert re.search(r"\| Repository +\|", console)
         assert not list(tmp_path.rglob("*.md"))
+
+    @pytest.mark.parametrize("name", [".venv", "venv", "custom python"])
+    def test_report_uses_the_running_python_environment(
+        self, tmp_path, monkeypatch, name
+    ):
+        """!
+        @brief Report runtime paths instead of guessing from a folder name.
+        @param tmp_path Temporary repo used to produce the report.
+        @param monkeypatch Replace runtime paths and an unrelated shell setting.
+        @param name Environment directory name that should appear in the report.
+        """
+        prefix = str(tmp_path / name)
+        executable = str(tmp_path / name / "python")
+        monkeypatch.setattr(sys, "prefix", prefix)
+        monkeypatch.setattr(sys, "executable", executable)
+        monkeypatch.setenv("VIRTUAL_ENV", "unrelated shell environment")
+        with CheckOutput(tmp_path) as output:
+            QualityReport(ProjectSource(tmp_path)).begin(output)
+        evidence = "".join(
+            "".join(row[2:-2].split())
+            for row in output.path.read_text().splitlines()
+            if row.startswith("|")
+        )
+        assert "Pythonenvironment:" + "".join(prefix.split()) in evidence
+        assert "Pythonexecutable:" + "".join(executable.split()) in evidence
+        assert "unrelated shell environment" not in output.path.read_text()
 
     def test_input_edits_invalidate_report_but_generated_logs_do_not(
         self, tmp_path

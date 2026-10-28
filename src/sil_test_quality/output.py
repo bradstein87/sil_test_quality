@@ -3,6 +3,7 @@
 """
 
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -146,9 +147,7 @@ class CheckOutput:
         """
         name = Path(command[0].replace("\\", "/")).name
         arguments = command[1:]
-        if re.fullmatch(
-            r"(?:pythonw?|pypy|py)(?:\d+(?:\.\d+)*)?(?:\.exe)?", name.lower()
-        ):
+        if CheckOutput.is_python(command[0]):
             module, arguments = CheckOutput._module(arguments)
             name = module or name
         if name in ("coverage", "coverage.exe") and arguments[:1] == ["run"]:
@@ -156,6 +155,20 @@ class CheckOutput:
             if target:
                 name += f" / {target}"
         return name
+
+    @staticmethod
+    def is_python(executable: str) -> bool:
+        """!
+        @brief Recognize Python executables and launchers.
+        @param executable Command executable, with or without its full path.
+        @return True for this runtime or a standard Python executable name.
+        """
+        name = Path(executable.replace("\\", "/")).name.lower()
+        return executable == sys.executable or bool(
+            re.fullmatch(
+                r"(?:pythonw?|pypy|py)(?:\d+(?:\.\d+)*)?(?:\.exe)?", name
+            )
+        )
 
     @staticmethod
     def _module(arguments: list[str]) -> tuple[str, list[str]]:
@@ -231,11 +244,16 @@ class CheckOutput:
         except OSError as error:
             self.detail(str(error))
             status = 1
-        self._command_details(command, tool, options, status)
+        self._command_details(command, tool, options, status, environment)
         return status
 
     def _command_details(
-        self, command: list[str], tool: str, options: Sequence[str], status: int
+        self,
+        command: list[str],
+        tool: str,
+        options: Sequence[str],
+        status: int,
+        environment: Mapping[str, str],
     ) -> None:
         """!
         @brief Record which tool ran and the arguments it received.
@@ -243,20 +261,69 @@ class CheckOutput:
         @param tool Name derived from the executable and module arguments.
         @param options Arguments appended by command and included as evidence.
         @param status Tool exit code, or one if it could not run.
+        @param environment Variables used by the tool and its version lookup.
         """
         self.detail(f"- Tool: {tool}")
-        if command[0] == sys.executable:
-            for package in tool.split(" / "):
-                try:
-                    installed = version(package)
-                except PackageNotFoundError:
-                    installed = "unavailable"
-                self.detail(f"- Version: {package} {installed}")
+        if self.is_python(command[0]):
+            module, _ = self._module(command[1:])
+            packages = tool.split(" / ") if module else [""]
+            for package in packages:
+                installed = self._tool_version(command, package, environment)
+                self.detail(f"- Version: {installed}")
         else:
             self.detail("- Version: unavailable for this executable")
         if options:
             self.detail(f"- Options: {shlex.join(options)}")
         self.detail(f"- Exit status: {status}")
+
+    def _tool_version(
+        self, command: list[str], package: str, environment: Mapping[str, str]
+    ) -> str:
+        """!
+        @brief Read a tool's version from the Python that ran it.
+        @param command Tool command, including any Python launcher selector.
+        @param package Module to look up, or empty for Python itself.
+        @param environment Variables passed to that Python process.
+        @return Package version, Python version for standard-library tools,
+        or an unavailable message when the lookup fails.
+        """
+        if command[0] == sys.executable:
+            if not package or package.split(".")[0] in sys.stdlib_module_names:
+                return f"Python {platform.python_version()}"
+            try:
+                return f"{package} {version(package)}"
+            except PackageNotFoundError:
+                return f"{package} unavailable"
+
+        module, _ = self._module(command[1:])
+        python = command[: command.index("-m")] if module else command[:1]
+        probe = (
+            "import sys\n"
+            "from importlib.metadata import version\n"
+            "from platform import python_version\n"
+            "name = sys.argv[1]\n"
+            "if not name or name.split('.')[0] in sys.stdlib_module_names:\n"
+            "    print('Python ' + python_version())\n"
+            "else:\n"
+            "    print(name + ' ' + version(name))\n"
+        )
+        try:
+            result = subprocess.run(
+                [*python, "-I", "-c", probe, package],
+                cwd=self.root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout:
+                return result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return f"{package or 'Python'} unavailable"
 
     def result(self, label: str, passed: bool) -> None:
         """!

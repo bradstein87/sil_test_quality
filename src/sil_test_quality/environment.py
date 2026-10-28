@@ -130,6 +130,10 @@ class HookEnvironment:
         ) as output:
             for label, command in commands:
                 output.start(label)
+                if label == "Environment":
+                    output.detail(f"- Setup Python: {sys.executable}")
+                    output.detail(f"- Target environment: {self.directory}")
+                    output.detail(f"- Target Python: {self.python}")
                 status = output.command(command, env=environment)
                 output.result(label, status == 0)
                 if status:

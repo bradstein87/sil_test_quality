@@ -4,9 +4,11 @@
 
 import io
 import os
+import platform
 import re
 import subprocess
 import sys
+import venv
 from importlib.metadata import version
 from pathlib import Path
 
@@ -366,6 +368,61 @@ class TestToolNames:
         for package in ("coverage", "pytest"):
             assert f"- Version: {package} {version(package)}" in log
         assert "- Version: ruff" not in log
+
+    @pytest.mark.parametrize("module", ["venv", "ensurepip"])
+    def test_standard_library_tools_use_the_python_version(
+        self, tmp_path, module
+    ):
+        """!
+        @brief Identify standard-library tools without a package-version lookup.
+        @param tmp_path Temporary working directory for the report.
+        @param module Standard-library module with a harmless help command.
+        """
+        with CheckOutput(tmp_path) as output:
+            assert output.command([sys.executable, "-m", module, "--help"]) == 0
+            output.result("Example", True)
+        log = output.path.read_text()
+        assert f"- Tool: {module}" in log
+        assert f"- Version: Python {platform.python_version()}" in log
+        assert "unavailable" not in log
+
+    def test_versions_are_read_from_the_other_environment(self, tmp_path):
+        """!
+        @brief Read pip and Python versions from an environment with any name.
+        @param tmp_path Temporary directory for an isolated Python installation.
+        """
+        directory = tmp_path / "custom python"
+        builder = venv.EnvBuilder(with_pip=True)
+        builder.create(directory)
+        python = builder.ensure_directories(directory).env_exec_cmd
+        expected = subprocess.check_output(
+            [python, "-m", "pip", "--version"], text=True
+        ).split()
+        with CheckOutput(tmp_path) as output:
+            assert output.command([python, "-m", "pip", "--version"]) == 0
+            output.result("Install", True)
+            assert output.command([python, "-m", "venv", "--help"]) == 0
+            output.result("Environment", True)
+        log = output.path.read_text()
+        assert f"- Version: pip {expected[1]}" in log
+        assert f"- Version: Python {platform.python_version()}" in log
+        assert "unavailable" not in log
+
+    @pytest.mark.parametrize("missing", ["package", "executable"])
+    def test_missing_metadata_does_not_invent_a_version(
+        self, tmp_path, missing
+    ):
+        """!
+        @brief Keep an unavailable version visible when its lookup cannot run.
+        @param tmp_path Temporary working directory for the report.
+        @param missing Select a missing package or a missing Python executable.
+        """
+        python = sys.executable if missing == "package" else "/absent/python"
+        with CheckOutput(tmp_path) as output:
+            assert output.command([python, "-m", "missing_quality_tool"]) != 0
+            output.result("Example", False)
+        log = output.path.read_text()
+        assert "- Version: missing_quality_tool unavailable" in log
 
     def test_reported_options_are_passed_to_the_process(self, tmp_path):
         """!

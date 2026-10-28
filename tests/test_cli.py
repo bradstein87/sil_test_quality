@@ -50,6 +50,7 @@ class TestReportModes:
             (["--brief"], True, False),
             (["--normal"], False, False),
             (["--verbose"], False, True),
+            (["-v"], False, True),
         ],
     )
     def test_cli_modes(self, tmp_path, monkeypatch, args, brief, verbose):
@@ -75,15 +76,18 @@ class TestReportModes:
         assert cli.main(tmp_path) == 7
         assert calls == [{"fix": False, "brief": brief, "verbose": verbose}]
 
-    def test_cli_rejects_conflicting_modes(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "args",
+        [["--brief", "--verbose"], ["--brief", "--normal"], ["--normal", "-v"]],
+    )
+    def test_cli_rejects_conflicting_modes(self, monkeypatch, args):
         """!
         @brief Reject conflicting report-mode flags.
         @param monkeypatch Pytest fixture for replacing dependencies and
         restoring them afterward.
+        @param args Conflicting report options supplied together.
         """
-        monkeypatch.setattr(
-            cli.sys, "argv", ["sil-test-quality", "--brief", "--verbose"]
-        )
+        monkeypatch.setattr(cli.sys, "argv", ["sil-test-quality", *args])
         with pytest.raises(SystemExit) as error:
             cli.main()
         assert error.value.code == 2
@@ -165,6 +169,55 @@ class TestPrecommitCommand:
     """!
     @brief Check failure reporting when the hook cannot start.
     """
+
+    @pytest.mark.parametrize("help_option", ["-h", "--help"])
+    def test_help_skips_environment_setup(
+        self, tmp_path, monkeypatch, capsys, help_option
+    ):
+        """!
+        @brief Show command help without preparing a checker environment.
+        @param tmp_path Empty repository with no checker configuration.
+        @param monkeypatch Pytest helper for setting command-line arguments.
+        @param capsys Captured help output.
+        @param help_option Short or long help option to invoke.
+        """
+        monkeypatch.setattr(cli.sys, "argv", ["sil-test-quality", help_option])
+        assert cli.main(tmp_path) == 0
+        help_text = capsys.readouterr().out
+        assert "--fix" in help_text and "--root" in help_text
+        assert "@brief" not in help_text
+        assert list(tmp_path.iterdir()) == []
+
+    def test_root_override_preserves_fix_and_failure_status(
+        self, tmp_path, monkeypatch
+    ):
+        """!
+        @brief Honor the selected repo and return its failing check status.
+        @param tmp_path Parent of the selected repository and bootstrap default.
+        @param monkeypatch Pytest helper for recording checker calls.
+        """
+        selected = tmp_path / "repo with spaces"
+        calls = []
+        monkeypatch.setattr(
+            cli.sys,
+            "argv",
+            ["sil-test-quality", "--root", str(selected), "--fix", "-v"],
+        )
+        monkeypatch.setattr(
+            cli.HookEnvironment,
+            "__init__",
+            lambda self, root: calls.append(root),
+        )
+        monkeypatch.setattr(
+            cli.HookEnvironment,
+            "run",
+            lambda self, **options: calls.append(options) or 1,
+        )
+        assert cli.main(tmp_path) == 1
+        assert calls == [
+            selected.resolve(),
+            {"fix": True, "verbose": True, "brief": False},
+        ]
 
     def test_setup_failure_replaces_old_success_evidence(
         self, tmp_path, monkeypatch

@@ -4,6 +4,7 @@
 
 import platform
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -81,6 +82,8 @@ class QualityReport:
             f"- Runtime: {platform.system()}, "
             f"Python {platform.python_version()}"
         )
+        output.detail(f"- Python executable: {sys.executable}")
+        output.detail(f"- Python environment: {sys.prefix}")
         output.detail("- Scope: maintained files, mypy src/, pytest tests/")
         excluded = [
             f"- Legacy excluded: {name}" for name in self.source.exclusions

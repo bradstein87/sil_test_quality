@@ -60,6 +60,8 @@ class EnvironmentInstaller:
         installation failure.
         """
 
+        if "-c" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="pip 1.0")
         self.commands.append(command)
         if "venv" in command:
             self.environment.python.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +107,14 @@ class TestHookEnvironment:
             command[0] == str(environment.python) for command in installs
         )
         assert environment.ready.is_file()
+        rows = (hook_project / "artifacts/precommit-setup.log").read_text()
+        evidence = "".join(
+            "".join(row[2:-2].split())
+            for row in rows.splitlines()
+            if row.startswith("|")
+        )
+        assert "Targetenvironment:" + str(environment.directory) in evidence
+        assert "TargetPython:" + str(environment.python) in evidence
 
         installer.commands.clear()
         installer.check_status = 7
