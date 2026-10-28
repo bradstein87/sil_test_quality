@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+quality_fix=false
+quality_mode=
+for quality_argument in "$@"; do
+    case "$quality_argument" in
+        --fix) quality_fix=true ;;
+        -v|--verbose|--brief|--normal)
+            if [ -n "$quality_mode" ]; then
+                echo "Choose one report mode: --brief, --normal, or --verbose" >&2
+                exit 2
+            fi
+            quality_mode=$quality_argument
+            if [ "$quality_mode" = -v ]; then
+                quality_mode=--verbose
+            fi
+            ;;
+        -h|--help)
+            echo "Usage: git hook run pre-commit -- [--fix] [--brief | --normal | --verbose]"
+            exit 0
+            ;;
+        *)
+            echo "Unknown precommit option: $quality_argument" >&2
+            exit 2
+            ;;
+    esac
+done
+
+set --
+for quality_command in ./.venv/bin/python ./.venv/Scripts/python.exe python python3 py; do
+    if command -v "$quality_command" >/dev/null 2>&1; then
+        set -- "$quality_command"
+        if [ "$quality_command" = py ]; then
+            set -- "$quality_command" -3
+        fi
+        if "$@" -I -c 'import sys; sys.exit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+            break
+        fi
+        set --
+    fi
+done
+
+if [ "$#" -eq 0 ]; then
+    echo "Precommit FAILED: Python setup. Python 3.11 or newer must be available on PATH." >&2
+    exit 1
+fi
+
+quality_script=tools/precommit.py
+if command -v wslpath >/dev/null 2>&1; then
+    quality_platform=$("$@" -I -c 'import sys; print(sys.platform)')
+    if [ "$quality_platform" = win32 ]; then
+        # Windows Python needs a Windows path, including for files stored in WSL.
+        quality_script=$(wslpath -w "$PWD/tools/precommit.py")
+    fi
+fi
+
+if quality_configured_verbose=$(git config --bool --get precommit.verbose); then
+    if [ -z "$quality_mode" ] && [ "$quality_configured_verbose" = true ]; then
+        quality_mode=--verbose
+    fi
+fi
+
+set -- "$@" -I "$quality_script"
+if [ "$quality_fix" = true ]; then
+    set -- "$@" --fix
+fi
+if [ -n "$quality_mode" ]; then
+    set -- "$@" "$quality_mode"
+fi
+exec "$@"

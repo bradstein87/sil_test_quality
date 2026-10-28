@@ -1,0 +1,5 @@
+pytest==9.0.1
+coverage==7.13.5
+ruff==0.8.4
+mypy==2.4.0
+lizard==1.24.3

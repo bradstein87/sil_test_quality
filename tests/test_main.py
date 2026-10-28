@@ -1,0 +1,44 @@
+"""!
+@brief Tests for running the checker as a Python module.
+"""
+
+import runpy
+from pathlib import Path
+
+import pytest
+
+from sil_test_quality import cli
+
+
+class TestModuleCommand:
+    """!
+    @brief Check delegation from the module entry point.
+    """
+
+    def test_module_preserves_arguments_and_exit_status(self, monkeypatch):
+        """!
+        @brief Forward module arguments and the resulting exit status.
+        @param monkeypatch Pytest fixture for replacing dependencies and
+        restoring them afterward.
+        """
+        calls = []
+        monkeypatch.setattr(
+            cli.sys, "argv", ["sil_test_quality", "--fix", "--verbose"]
+        )
+        monkeypatch.setattr(
+            cli.HookEnvironment,
+            "__init__",
+            lambda self, root: calls.append(root),
+        )
+        monkeypatch.setattr(
+            cli.HookEnvironment,
+            "run",
+            lambda self, **options: calls.append(options) or 7,
+        )
+        with pytest.raises(SystemExit) as result:
+            runpy.run_module("sil_test_quality", run_name="__main__")
+        assert result.value.code == 7
+        assert calls == [
+            Path.cwd(),
+            {"fix": True, "verbose": True, "brief": False},
+        ]
