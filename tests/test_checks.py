@@ -260,6 +260,7 @@ class TestReportedSettings:
         assert "linter.line_length = 100" in log
         assert "formatter.line_width = 100" in log
         assert "B006" in log and "F401" in log
+        assert "B006 (mutable-argument-default)" in log
         assert "linter.per_file_ignores" in log
         assert "Line width: 88" not in log
 
@@ -273,6 +274,52 @@ class TestReportedSettings:
             RepositoryChecks(checked_project).check_settings(output, [])
             assert output.results["Settings"] == "FAIL"
         assert "TOML parse error" in output.path.read_text()
+
+    def test_prefix_selections_include_only_enabled_rules(
+        self, checked_project
+    ):
+        """!
+        @brief Expand prefixes using Ruff and leave ignored rules out.
+        @param checked_project Sample repo with a prefix and an ignored rule.
+        """
+        (checked_project / "ruff.toml").write_text(
+            '[lint]\nselect = ["E4", "E501"]\nignore = ["E402"]\n'
+        )
+        with CheckOutput(checked_project) as output:
+            RepositoryChecks(checked_project).check_settings(output, [])
+            assert output.results["Settings"] == "PASS"
+        log = output.path.read_text()
+        assert "E401 (multiple-imports-on-one-line)" in log
+        assert "E501 (line-too-long)" in log
+        assert "E402 (module-import-not-at-top-of-file)" not in log
+
+    def test_missing_rule_metadata_fails_settings(
+        self, checked_project, monkeypatch
+    ):
+        """!
+        @brief Reject a settings report when Ruff cannot describe its rules.
+        @param checked_project Sample repo used to run the settings check.
+        @param monkeypatch Replace tool output with an incomplete catalog.
+        """
+
+        def tool_output(command, *, view, **kwargs):
+            """!
+            @brief Return valid settings followed by missing rule metadata.
+            @param command Tool command identifying settings or metadata.
+            @param view Report renderer to receive the simulated output.
+            @param kwargs Other command options, unused by this replacement.
+            @return Zero to isolate failure in the metadata itself.
+            """
+            if "check" in command:
+                view("linter.rules.enabled = [rule (E401)]")
+            else:
+                view("[]")
+            return 0
+
+        with CheckOutput(checked_project) as output:
+            monkeypatch.setattr(output, "command", tool_output)
+            RepositoryChecks(checked_project).check_settings(output, [])
+            assert output.results["Settings"] == "FAIL"
 
     def test_file_limit_matches_the_report(self, checked_project, monkeypatch):
         """!

@@ -135,7 +135,6 @@ class HookEnvironment:
                 if status:
                     raise subprocess.CalledProcessError(status, command)
         self.ready.touch()
-        print("[PASS] Check environment", flush=True)
 
     def run(
         self, fix: bool = False, verbose: bool = False, brief: bool = False

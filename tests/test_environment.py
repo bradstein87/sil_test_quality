@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from sil_test_quality import __version__
 from sil_test_quality.checks import RepositoryChecks
 from sil_test_quality.environment import HookEnvironment
 
@@ -23,7 +24,7 @@ def hook_project(tmp_path):
     (tmp_path / "requirements.txt").write_text("pytest==9.0.1\n")
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "hook-example"\nversion = "1.0"\n'
-        '[tool.sil-test-quality]\nversion = "0.1.0"\n'
+        f'[tool.sil-test-quality]\nversion = "{__version__}"\n'
         'version-file = "version.py"\n'
     )
     (tmp_path / "version.py").write_text("VERSION = 1\n")
@@ -233,8 +234,8 @@ class TestHookEnvironment:
         manifest = hook_project / "pyproject.toml"
         manifest.write_text(
             manifest.read_text().replace(
-                'version = "0.1.0"', 'version = "0.2.0"'
+                f'version = "{__version__}"', 'version = "0.2.0"'
             )
         )
-        with pytest.raises(ValueError, match="loaded 0.1.0"):
+        with pytest.raises(ValueError, match=f"loaded {__version__}"):
             HookEnvironment(hook_project)

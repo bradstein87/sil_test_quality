@@ -173,18 +173,27 @@ class RepositoryChecks:
         self, output: CheckOutput, exclusions: list[str]
     ) -> None:
         """!
-        @brief Include Ruff's resolved settings in the report.
+        @brief Report Ruff's resolved settings and selected rule descriptions.
         @param output Report recorder receiving the settings and result.
         @param exclusions Arguments used by the lint and formatting commands.
         """
         output.start("Settings")
+        report = SettingsReport()
         status = output.command(
             [sys.executable, "-m", "ruff", "check"],
             options=["--show-settings", ".", *exclusions],
-            view=SettingsReport().render,
+            view=report.render,
             literal=True,
         )
-        output.result("Settings", status == 0)
+        if status == 0:
+            output.detail("- Prefix selections expand to individual rule codes")
+            status = output.command(
+                [sys.executable, "-m", "ruff", "rule"],
+                options=["--all", "--output-format", "json"],
+                view=report.describe_rules,
+                literal=True,
+            )
+        output.result("Settings", status == 0 and report.rules_complete)
 
     def check_formatting(
         self, output: CheckOutput, exclusions: list[str]
