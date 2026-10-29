@@ -140,6 +140,105 @@ class TestProjectSource:
             ProjectSource(root)
 
 
+class TestLineWidths:
+    """!
+    @brief Check the column limit independently of Ruff's exceptions.
+    """
+
+    @pytest.mark.parametrize("suffix", [".py", ".pyi", ".pyw"])
+    def test_boundary_tabs_and_windows_newlines(self, tmp_path, suffix):
+        """!
+        @brief Allow 80 columns and reject 81, including expanded indentation.
+        @param tmp_path Temporary repo containing the measured source file.
+        @param suffix Python file extension covered by the width check.
+        """
+        path = tmp_path / f"sample{suffix}"
+        path.write_bytes(
+            ("x" * 80 + "\r\n" + "x" * 81 + "\r\n\t" + "x" * 77).encode()
+        )
+        assert ProjectSource(tmp_path).line_widths() == [
+            f"sample{suffix}:2: 81 columns (limit is 80)",
+            f"sample{suffix}:3: 81 columns (limit is 80)",
+        ]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "identifier_" + "x" * 70,
+            "#" + "x" * 80,
+            '"""' + "x" * 75 + '"""',
+            "# https://example.com/".ljust(81, "x"),
+            "VALUE = 1".ljust(70) + "  # noqa: E501",
+        ],
+        ids=["identifier", "comment", "docstring", "url", "noqa"],
+    )
+    def test_ruff_exceptions_do_not_bypass_width(self, tmp_path, line):
+        """!
+        @brief Reject overlong lines even when Ruff would allow them.
+        @param tmp_path Temporary repo containing the measured source file.
+        @param line Code or documentation that exceeds the shared limit.
+        """
+        (tmp_path / "sample.py").write_text(line, encoding="utf-8")
+        assert ProjectSource(tmp_path).line_widths() == [
+            f"sample.py:1: {len(line)} columns (limit is 80)"
+        ]
+
+    def test_findings_are_widest_first(self, tmp_path):
+        """!
+        @brief Put the longest lines first, regardless of filename or location.
+        @param tmp_path Temporary repo with several overlong source lines.
+        """
+        (tmp_path / "a.py").write_text("x" * 81 + "\n" + "x" * 110)
+        (tmp_path / "z.py").write_text("x" * 90)
+        assert ProjectSource(tmp_path).line_widths() == [
+            "a.py:2: 110 columns (limit is 80)",
+            "z.py:1: 90 columns (limit is 80)",
+            "a.py:1: 81 columns (limit is 80)",
+        ]
+
+    def test_scope_respects_exclusions(self, project_with_legacy_file):
+        """!
+        @brief Skip generated, excluded and non-Python files.
+        @param project_with_legacy_file Temporary repo with legacy exclusions.
+        """
+        root = project_with_legacy_file
+        for name in ("artifacts", "custom-python"):
+            directory = root / name
+            directory.mkdir()
+            if name == "custom-python":
+                (directory / "pyvenv.cfg").touch()
+            (directory / "generated.py").write_text("x" * 81)
+        (root / "src/legacy/old_tool.py").write_text("x" * 81)
+        (root / "README.md").write_text("x" * 81)
+        assert ProjectSource(root).line_widths() == []
+        (root / "tools/helper.py").write_text("x" * 81)
+        assert ProjectSource(root).line_widths() == [
+            "tools/helper.py:1: 81 columns (limit is 80)"
+        ]
+
+    @pytest.mark.parametrize("content", [b"\xff", b"# coding: unknown-codec\n"])
+    def test_invalid_encoding_fails_the_check(self, tmp_path, content):
+        """!
+        @brief Report files that cannot be read instead of accepting them.
+        @param tmp_path Temporary repo containing the unreadable source file.
+        @param content Invalid encoded bytes or an unsupported encoding header.
+        """
+        (tmp_path / "sample.py").write_bytes(content)
+        findings = ProjectSource(tmp_path).line_widths()
+        assert len(findings) == 1
+        assert findings[0].startswith("sample.py:1: cannot measure lines:")
+
+    def test_declared_encoding_counts_characters(self, tmp_path):
+        """!
+        @brief Measure decoded characters using the file's Python encoding.
+        @param tmp_path Temporary repo containing non-UTF-8 source.
+        """
+        (tmp_path / "sample.py").write_bytes(
+            b"# coding: latin-1\n#" + b"\xe9" * 79
+        )
+        assert ProjectSource(tmp_path).line_widths() == []
+
+
 class TestSourceStructure:
     """!
     @brief Check source violations without flagging example text.

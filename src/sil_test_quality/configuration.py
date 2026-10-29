@@ -9,6 +9,7 @@ from typing import Any
 
 # Limits used by checks and their report descriptions.
 MAX_FILE_LINES = 500
+MAX_LINE_COLUMNS = 80
 MAX_COMPLEXITY = 20
 FUNCTION_REVIEW_LINES = 60
 MIN_FILE_COVERAGE = 90

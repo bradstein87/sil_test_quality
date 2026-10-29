@@ -6,6 +6,8 @@ import re
 import shutil
 from pathlib import Path
 
+import pytest
+
 from sil_test_quality import configuration as policy
 from sil_test_quality.checks import RepositoryChecks
 from sil_test_quality.output import CheckOutput
@@ -335,6 +337,66 @@ class TestReportedSettings:
         log = output.path.read_text()
         assert "File length: <= 8 physical lines" in log
         assert "notes.txt: 9 lines (limit is 8)" in log
+
+
+class TestWidthReport:
+    """!
+    @brief Check blocking width findings in every report mode.
+    """
+
+    @pytest.mark.parametrize("mode", ["normal", "brief", "verbose"])
+    def test_width_report_modes(self, checked_project, capsys, mode):
+        """!
+        @brief Keep every finding in the log while limiting normal output.
+        @param checked_project Temporary repo containing valid checker settings.
+        @param capsys Capture console output for this report mode.
+        @param mode Brief, normal or verbose console output to verify.
+        """
+        (checked_project / "sample.py").write_text(
+            "\n".join("x" * width for width in [81, 82, 83, 84])
+        )
+        with CheckOutput(
+            checked_project, verbose=mode == "verbose", brief=mode == "brief"
+        ) as output:
+            RepositoryChecks(checked_project).check_width(output)
+            assert output.finish() == 1
+        console = capsys.readouterr().out
+        log = output.path.read_text()
+        assert re.search(r"\| Width +FAIL \|", console)
+        assert "- Width issues: 4" in log
+        for number in range(1, 5):
+            finding = f"sample.py:{number}: {80 + number} columns"
+            assert finding in log
+            visible = mode == "verbose" or (mode == "normal" and number > 1)
+            assert (finding in console) == visible
+        assert ("..." in console) == (mode == "normal")
+
+    def test_only_width_failure_blocks_the_run(self, checked_project, capfd):
+        """!
+        @brief Block an overlong line even when every other check passes.
+        @param checked_project Temporary repo with otherwise passing checks.
+        @param capfd Capture tool output and the final failure summary.
+        """
+        path = checked_project / "src/example.py"
+        path.write_text(
+            path.read_text()
+            + "\n"
+            + "# https://example.com/".ljust(81, "x")
+            + "\n"
+        )
+        manifest = checked_project / "pyproject.toml"
+        manifest.write_text(
+            manifest.read_text() + "\n[tool.ruff]\nline-length = 80\n"
+            '[tool.ruff.lint]\nextend-select = ["E501"]\n'
+        )
+        assert RepositoryChecks(checked_project).run() == 1
+        console = capfd.readouterr().out
+        log = (checked_project / "artifacts/precommit.log").read_text()
+        assert re.search(r"\| Width +FAIL \|", console)
+        assert re.search(r"\| Lint +PASS \|", console)
+        assert re.search(r"\| Formatting +PASS \|", console)
+        assert len(re.findall(r"\| \w+ +FAIL \|", console)) == 2
+        assert "src/example.py:5: 81 columns (limit is 80)" in log
 
 
 class TestCheckFailures:

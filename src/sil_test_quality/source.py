@@ -165,6 +165,38 @@ class ProjectSource:
                 )
         return problems
 
+    def line_widths(self) -> list[str]:
+        """!
+        @brief Find Python lines that exceed the column limit.
+        @details Counts indentation, comments and docstrings. Tabs advance to
+        four-column stops. URLs, long names and noqa comments get no exception.
+        Generated content and declared legacy exclusions remain outside scope.
+        @return Findings with file, line and column count, widest first. Read
+        failures are also reported so an unreadable file cannot pass.
+        """
+        findings = []
+        errors = []
+        for path in self.files():
+            if path.suffix not in {".py", ".pyi", ".pyw"}:
+                continue
+            relative = path.relative_to(self.root).as_posix()
+            try:
+                with tokenize.open(path) as stream:
+                    for number, line in enumerate(stream, 1):
+                        width = len(line.rstrip("\r\n").expandtabs(4))
+                        if width > policy.MAX_LINE_COLUMNS:
+                            findings.append(
+                                (
+                                    width,
+                                    f"{relative}:{number}: {width} columns "
+                                    f"(limit is {policy.MAX_LINE_COLUMNS})",
+                                )
+                            )
+            except (OSError, SyntaxError, UnicodeError) as error:
+                errors.append(f"{relative}:1: cannot measure lines: {error}")
+        findings.sort(key=lambda finding: finding[0], reverse=True)
+        return errors + [message for _, message in findings]
+
     def inspect(self) -> tuple[list[str], list[str]]:
         """!
         @brief Check source structure and find inline exceptions.

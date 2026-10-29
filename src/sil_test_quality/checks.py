@@ -112,6 +112,7 @@ class RepositoryChecks:
         for name in (".coverage", "coverage.json", "unit-tests.xml"):
             (self.root / "artifacts" / name).unlink(missing_ok=True)
         self.check_files(output)
+        self.check_width(output)
         suppressions = self.check_structure(output)
         DoxygenDocstrings().run(self.source, output)
         ComplexityChecks(self.source, output).run()
@@ -149,6 +150,26 @@ class RepositoryChecks:
         )
         output.detail(f"- Files over limit: {len(sizes)}")
         output.result("Files", not sizes)
+
+    def check_width(self, output: CheckOutput) -> None:
+        """!
+        @brief Reject Python lines over the shared column limit.
+        @param output Report recorder receiving line locations and the verdict.
+        Normal mode shows three findings, and verbose mode shows all of them.
+        """
+        output.start("Width")
+        problems = self.source.line_widths()
+        output.detail(f"- Line width: <= {policy.MAX_LINE_COLUMNS} columns")
+        output.detail("- Scope: .py, .pyi and .pyw files, including tests")
+        output.detail("- Includes: code, comments, docstrings and indentation")
+        output.detail("- Tabs: four-column stops")
+        output.detail("- Order: widest first, read errors first")
+        normal = problems[: policy.NORMAL_ROWS]
+        if len(problems) > policy.NORMAL_ROWS:
+            normal.append("...")
+        output.detail("\n".join(problems), normal="\n".join(normal))
+        output.detail(f"- Width issues: {len(problems)}")
+        output.result("Width", not problems)
 
     def check_structure(self, output: CheckOutput) -> list[str]:
         """!
