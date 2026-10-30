@@ -35,6 +35,7 @@ class TestCoverageReport:
         assert "best.py" not in normal and "best.py" in full
         assert "TOTAL" in normal and "Missing" in normal
         assert "Branch" not in full and "..." in normal
+        assert normal.index("...") < normal.index("TOTAL")
         assert not (tmp_path / ".coverage").exists()
 
     def test_project_exclusions_are_retained(self, tmp_path):

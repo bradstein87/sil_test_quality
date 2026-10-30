@@ -56,7 +56,7 @@ class TestLizardReport:
         )
         report = LizardReport()
         assert report.render(text) == (text, text)
-        assert report.lengths() == ("- No functions above 60 lines.",) * 2
+        assert report.lengths() == ("- No functions measured.",) * 2
 
     def test_length_report_is_longest_first_without_duplicate_warnings(self):
         """!
@@ -74,7 +74,7 @@ class TestLizardReport:
         report.render(text)
         full, normal = report.lengths()
         assert full.count("f160@") == 1
-        assert "f60@" not in full
+        assert "f60@" in full and "f60@" not in normal
         assert full.index("f160@") < full.index("f120@") < full.index("f80@")
         assert "f61@" in full and "f61@" not in normal
         assert normal.splitlines()[-1] == "..."

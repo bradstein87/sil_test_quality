@@ -16,7 +16,6 @@ def checked_project(tmp_path):
 
     (tmp_path / "pyproject.toml").write_text(
         '[tool.sil-test-quality]\nversion = "0.1.0"\n'
-        'test-label = "Harness software tests"\n'
         'coverage-omit = ["src/vv_test_verification/cases/*"]\n'
     )
     source = tmp_path / "src"
@@ -109,7 +108,7 @@ def partially_covered_project(checked_project):
     (root / "src/example.py").write_text(source)
     (root / "src/choice.py").write_text(
         '"""! @brief Example conditional."""\n\n\n'
-        "def choose(value):\n"
+        "def choose(value: bool) -> str:\n"
         '    """! @brief Select text from a boolean.\n'
         "    @param value Boolean condition.\n"
         "    @return Yes or no.\n"

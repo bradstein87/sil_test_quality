@@ -1,0 +1,44 @@
+# Shared tool settings. Consumer settings may add checks but cannot remove them.
+[tool.ruff]
+target-version = "py311"
+line-length = 80
+indent-width = 4
+
+[tool.ruff.format]
+indent-style = "space"
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
+select = [
+  "E4", "E501", "E7", "E9", "F", "I", "B", "SIM115",
+  "N801", "N802", "N803", "N804", "N805", "N806", "N815", "N816",
+  "TID251", "RUF006", "PLC0415",
+]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+  "fastapi.security.HTTPBearer", "fastapi.Body", "fastapi.Depends",
+  "fastapi.Header", "fastapi.Query",
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"_pytest" = {msg = "Use pytest's public exports."}
+"starlette.requests" = {msg = "Use fastapi.Request."}
+"starlette.responses" = {msg = "Use fastapi.responses."}
+"starlette.testclient" = {msg = "Use fastapi.testclient."}
+"reflex.utils.prerequisites" = {msg = "Use the public Reflex CLI."}
+
+[tool.mypy]
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+follow_imports = "silent"
+python_version = "3.11"

@@ -22,21 +22,9 @@ class DiagnosticReport:
         @param text Captured tool/checker output used to sort & select issues.
         @return verbose output, logging, & normal with prioritized findings.
         """
-        blocks, trailing = self.records(text)
+        leading, blocks, trailing = self.records(text)
         if not blocks:
-            lines = text.splitlines()
-            ranked = sorted(
-                lines,
-                key=lambda line: not bool(
-                    re.search(r"error|failed|exception", line, re.I)
-                ),
-            )
-            preview = (
-                "\n".join([*ranked[: policy.NORMAL_ROWS], "..."])
-                if len(lines) > policy.NORMAL_ROWS
-                else text
-            )
-            return text, preview
+            return text, self._unstructured(text)
         counts = Counter(name for name, _ in blocks)
         blocks.sort(
             key=lambda item: (
@@ -50,7 +38,7 @@ class DiagnosticReport:
                 item[0],
             )
         )
-        normal = [
+        normal = leading + [
             line for _, block in blocks[: policy.NORMAL_ROWS] for line in block
         ]
         if len(blocks) > policy.NORMAL_ROWS:
@@ -58,16 +46,38 @@ class DiagnosticReport:
         normal.extend(trailing)
         return text, "\n".join(normal)
 
+    @staticmethod
+    def _unstructured(text: str) -> str:
+        """!
+        @brief Shorten plain output while keeping its opening and final lines.
+        @param text Tool output with no recognized file diagnostics.
+        @return Unchanged short output or boundary lines surrounding three
+        prioritized middle lines and an omission marker.
+        """
+        lines = text.strip().splitlines()
+        if len(lines) <= policy.NORMAL_ROWS + 2:
+            return text
+        middle = sorted(
+            lines[1:-1],
+            key=lambda line: not bool(
+                re.search(r"error|failed|exception", line, re.I)
+            ),
+        )
+        return "\n".join(
+            [lines[0], *middle[: policy.NORMAL_ROWS], "...", lines[-1]]
+        )
+
     def records(
         self, text: str
-    ) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
         """!
         @brief Pair diagnostic issues with corresponding explainations.
         @param text Outputs in Render: file paths, summaries, explainations.
-        @return two lists - pairs to rank in render & upgrouped lines - totals.
+        @return Opening context, grouped file diagnostics, and closing messages.
         """
         blocks: list[tuple[str, list[str]]] = []
-        trailing = []
+        leading: list[str] = []
+        trailing: list[str] = []
         for line in text.splitlines():
             match = self.LOCATION.match(line)
             if match:
@@ -77,5 +87,5 @@ class DiagnosticReport:
             elif blocks and (line.startswith((" ", "help:")) or not line):
                 blocks[-1][1].append(line)
             else:
-                trailing.append(line)
-        return blocks, trailing
+                (trailing if blocks else leading).append(line)
+        return leading, blocks, trailing

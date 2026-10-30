@@ -10,7 +10,6 @@ import subprocess
 import sys
 import venv
 from importlib.metadata import version
-from pathlib import Path
 
 import pytest
 
@@ -35,7 +34,7 @@ class TestCheckOutput:
         monkeypatch.setattr("sys.stdout", stream)
         monkeypatch.setattr(
             "sil_test_quality.activity.get_terminal_size",
-            lambda _: os.terminal_size((120, 24)),
+            lambda _: os.terminal_size((128, 24)),
         )
         return stream
 
@@ -82,29 +81,33 @@ class TestCheckOutput:
         )
         assert visible.count("| Tests ") == 1
         assert re.search(rf"\| Tests +{outcome} \|", visible)
-        assert all(len(row) == 120 for row in visible.splitlines())
+        assert all(len(row) in (0, 128) for row in visible.splitlines())
         saved = output.path.read_text()
         assert "\r" not in saved
         assert re.search(rf"\| Tests +{outcome} \|", saved)
-        if mode != "brief" or outcome == "ERROR":
-            assert visible == saved
+        if mode == "verbose" or outcome == "ERROR":
+            assert visible.rstrip("\n") == saved.rstrip("\n")
         else:
-            assert "test evidence" not in visible
+            assert ("test evidence" in visible) == (mode == "normal")
             assert "test evidence" in saved
 
+    @pytest.mark.parametrize("deferred", [False, True])
     @pytest.mark.parametrize("verbose", [False, True])
     def test_stage_results_are_visible_and_flushed_immediately(
-        self, tmp_path, capsys, verbose
+        self, tmp_path, capsys, verbose, deferred
     ):
         """!
-        @brief Publish each check result before the final summary.
+        @brief Publish verdicts immediately unless their blocks are held.
         @param tmp_path Pytest temporary directory for the sample files and
         artifacts.
         @param capsys Pytest capture used to check the printed Python output.
         @param verbose Full-output flag selected for this test scenario.
+        @param deferred Hold completed blocks until the final summary.
         """
 
         with CheckOutput(tmp_path, verbose, brief=not verbose) as output:
+            if deferred:
+                output.defer("Lint", "Coverage", "Tests")
             output.detail("All checks passed!")
             output.result("Lint", True)
             output.warning("Lengths", [])
@@ -114,7 +117,7 @@ class TestCheckOutput:
             expected = {
                 "Lint": "PASS",
                 "Lengths": "PASS",
-                "Branches": "WARNING",
+                "Branches": "WARN",
                 "Tests": "FAIL",
                 "Coverage": "FAIL",
             }
@@ -122,12 +125,19 @@ class TestCheckOutput:
             assert output.failures == ["Tests", "Coverage"]
             console = capsys.readouterr().out
             log = output.path.read_text()
+            if deferred:
+                assert console == log == ""
+                output.release()
+                console = capsys.readouterr().out
+                log = output.path.read_text()
             for label, status in (("Lint", "PASS"), ("Tests", "FAIL")):
                 assert re.search(rf"\| {label} +{status} \|", console)
                 assert re.search(rf"\| {label} +{status} \|", log)
             assert ("All checks passed!" in console) == verbose
             assert "All checks passed!" in log
             assert "One branch" not in console
+            assert console.count("\n\n") == (3 if verbose else 0)
+            assert log.count("\n\n") == 3
             output.finish()
 
     @pytest.mark.parametrize("verbose", [False, True])
@@ -145,24 +155,49 @@ class TestCheckOutput:
             output.result("Tests", False)
             output.result("Coverage", False)
             output.warning("Branches", ["One branch was not exercised"])
+            output.warning("Length", [])
             capsys.readouterr()
             assert output.finish() == 1
             ending = capsys.readouterr().out
             assert "One branch was not exercised" in ending
-            result_block = ending.split("Warnings")[0]
+            assert "Length" not in ending
+            result_block = ending[ending.index("| Result") :]
             assert re.search(r"\| Result +FAIL \|", result_block)
             assert "Failed sections:" in result_block
             assert "- Tests" in result_block and "- Coverage" in result_block
             assert (
                 "Verbose: git hook run pre-commit -- --verbose" in result_block
             )
-            assert re.search(r"\| Warnings +WARNING \|", ending)
-            assert "One branch was not exercised" in ending.splitlines()[-2]
-            assert all(len(line) == 120 for line in ending.splitlines())
+            assert re.search(r"\| Warnings +WARN \|", ending)
+            assert re.findall(
+                r"^\| (Warnings|Result) +", ending, re.MULTILINE
+            ) == ["Warnings", "Result"]
+            assert all(len(line) in (0, 128) for line in ending.splitlines())
+
+    @pytest.mark.parametrize("mode", ["brief", "normal", "verbose"])
+    def test_empty_warnings_are_omitted(self, tmp_path, capsys, mode):
+        """!
+        @brief Show only the final result when no advisories have findings.
+        @param tmp_path Directory for the report log.
+        @param capsys Capture the displayed blocks.
+        @param mode Report mode that must omit the empty warnings block.
+        """
+        with CheckOutput(
+            tmp_path, verbose=mode == "verbose", brief=mode == "brief"
+        ) as output:
+            output.warning("Length", [])
+            output.warning("Branch coverage", [])
+            assert output.finish() == 0
+        console = capsys.readouterr().out
+        assert "Warnings" not in console
+        assert "Warnings" not in output.path.read_text()
+        assert re.search(r"\| Result +PASS \|", console)
+        assert "Length" not in console
 
     @pytest.mark.parametrize("verbose", [False, True])
+    @pytest.mark.parametrize("status_code", [0, 3])
     def test_tool_output_is_complete_and_exit_status_is_preserved(
-        self, tmp_path, capsys, verbose
+        self, tmp_path, capsys, verbose, status_code
     ):
         """!
         @brief Keep complete tool output and its exit status.
@@ -170,30 +205,34 @@ class TestCheckOutput:
         artifacts.
         @param capsys Pytest capture used to check the printed Python output.
         @param verbose Full-output flag selected for this test scenario.
+        @param status_code Successful export or failed command to report.
         """
         command = [
             sys.executable,
             "-c",
             "import sys; "
             "[print(f'row-{index:04}') for index in range(240)]; "
-            "print('tool error', file=sys.stderr); sys.exit(3)",
+            f"print('tool message', file=sys.stderr); sys.exit({status_code})",
         ]
-        with CheckOutput(tmp_path, verbose, brief=not verbose) as output:
-            status = output.command(command, options=("example=1",))
+        with CheckOutput(tmp_path, verbose) as output:
+            status = output.command(
+                command, options=("example=1",), quiet_success=True
+            )
             output.result("Fixture tool", status == 0)
-            assert status == 3
-            assert output.finish() == 1
+            assert status == status_code
+            assert output.finish() == int(status_code != 0)
         console = capsys.readouterr().out
         log = output.path.read_text()
         for number in range(240):
             assert f"row-{number:04}" in log
-            assert (f"row-{number:04}" in console) == verbose
-        assert "tool error" in log
+        assert ("row-0120" in console) == verbose
+        assert ("row-0000" in console) == (verbose or status_code != 0)
+        assert "tool message" in log
         assert "- Options: example=1" in log
         assert "- Command" not in log
-        assert "- Exit status: 3" in log
+        assert f"- Exit status: {status_code}" in log
         assert "Remaining files" not in log
-        assert all(len(line) == 120 for line in log.splitlines())
+        assert all(len(line) in (0, 128) for line in log.splitlines())
 
     def test_failed_start_and_interrupted_check_retain_diagnostics(
         self, tmp_path, capsys
@@ -205,13 +244,15 @@ class TestCheckOutput:
         @param capsys Pytest capture used to check the printed Python output.
         """
         with pytest.raises(RuntimeError), CheckOutput(tmp_path) as output:
+            output.defer("Missing tool", "Tests", "Coverage")
             status = output.command([str(tmp_path / "absent")])
             assert status == 1
             output.result("Missing tool", False)
+            output.start("Tests")
             output.detail("Failure while evaluating collected data")
             raise RuntimeError("Unexpected failure")
         console = capsys.readouterr().out
-        assert "Incomplete" in console
+        assert re.search(r"\| Tests +ERROR \|", console)
         assert "Failure while evaluating collected data" in console
         assert "- Exit status: 1" in output.path.read_text()
 
@@ -230,34 +271,42 @@ class TestCheckOutput:
         assert "- Branch coverage: NOT RUN" in console
         assert "- None" not in console
 
-    def test_findings_precede_options_and_preserve_native_tables(
-        self, tmp_path, capsys
+    @pytest.mark.parametrize("verbose", [False, True])
+    def test_tool_context_precedes_results_and_preserves_native_tables(
+        self, tmp_path, capsys, verbose
     ):
         """!
-        @brief Show findings first and keep native table layout.
+        @brief Identify the tool before its results and keep native tables.
         @param tmp_path Pytest temporary directory for the sample files and
         artifacts.
         @param capsys Pytest capture used to check the printed Python output.
+        @param verbose Include command options and successful exit codes.
         """
-        with CheckOutput(tmp_path) as output:
+        with CheckOutput(tmp_path, verbose=verbose) as output:
             output.detail("Requirement: configured lint rules")
             status = output.command(
                 [sys.executable, "-c", "print('All checks passed!')"],
                 options=("repository rules",),
             )
+            assert output.command([sys.executable, "-c", "pass"]) == 0
             output.result("Lint", status == 0)
             output.detail("Table output:\nNLOC CCN\n  10   2", literal=True)
             output.section("Metrics", "PASS")
         console = capsys.readouterr().out
         assert "- Requirement: configured lint rules" in console
-        tool = Path(sys.executable).name
-        assert f"- {tool} output: All checks passed!" in console
-        assert console.index(f"{tool} output:") < console.index("- Options:")
+        assert console.count("\n\n") == 2
+        assert "- All checks passed!" in console
+        assert console.count("- Tool:") == 1
+        assert ("- Options:" in console) == verbose
+        assert ("- Exit status: 0" in console) == verbose
+        log = output.path.read_text()
+        assert log.index("- Tool:") < log.index("All checks passed!")
+        assert log.index("- Options:") < log.index("All checks passed!")
         rows = [row[2:-2].rstrip() for row in console.splitlines()]
         heading = rows.index("Table output:")
         assert rows[heading - 1] == ""
         assert rows[heading + 1 : heading + 3] == ["NLOC CCN", "  10   2"]
-        assert all(len(row) == 120 for row in console.splitlines())
+        assert all(len(row) in (0, 128) for row in console.splitlines())
 
     def test_prose_keeps_continuations_and_truncation_marks(self, tmp_path):
         """!
@@ -326,7 +375,7 @@ class TestToolNames:
         self, tmp_path, monkeypatch, capsys, command, expected, verbose
     ):
         """!
-        @brief Keep tool and output labels in sync with the command.
+        @brief Identify the command and keep its native output.
         @param tmp_path Temporary repo where the report log is written.
         @param monkeypatch Replace subprocess execution so tools need not be
         installed for these command examples.
@@ -342,13 +391,14 @@ class TestToolNames:
                 args[0], 0, stdout="tool evidence"
             ),
         )
+        assert CheckOutput.tool_name(command) == expected
         with CheckOutput(tmp_path, verbose=verbose) as output:
             assert output.command(command) == 0
             output.result("Example", True)
         for report in (capsys.readouterr().out, output.path.read_text()):
-            assert f"- Tool: {expected} " in report
-            assert f"- {expected} output: tool evidence" in report
-            assert all(len(line) == 120 for line in report.splitlines())
+            assert report.count("- Tool:") == 1
+            assert "- tool evidence" in report
+            assert all(len(line) in (0, 128) for line in report.splitlines())
 
     def test_versions_follow_the_executed_modules(self, tmp_path):
         """!
@@ -366,8 +416,8 @@ class TestToolNames:
             output.result("Example", True)
         log = output.path.read_text()
         for package in ("coverage", "pytest"):
-            assert f"- Version: {package} {version(package)}" in log
-        assert "- Version: ruff" not in log
+            assert f"{package} {version(package)}" in log
+        assert log.count("- Tool:") == 1
 
     @pytest.mark.parametrize("module", ["venv", "ensurepip"])
     def test_standard_library_tools_use_the_python_version(
@@ -382,8 +432,7 @@ class TestToolNames:
             assert output.command([sys.executable, "-m", module, "--help"]) == 0
             output.result("Example", True)
         log = output.path.read_text()
-        assert f"- Tool: {module}" in log
-        assert f"- Version: Python {platform.python_version()}" in log
+        assert f"Python {platform.python_version()} ({module})" in log
         assert "unavailable" not in log
 
     def test_versions_are_read_from_the_other_environment(self, tmp_path):
@@ -404,8 +453,8 @@ class TestToolNames:
             assert output.command([python, "-m", "venv", "--help"]) == 0
             output.result("Environment", True)
         log = output.path.read_text()
-        assert f"- Version: pip {expected[1]}" in log
-        assert f"- Version: Python {platform.python_version()}" in log
+        assert f"- Tool: pip {expected[1]}" in log
+        assert f"- Tool: Python {platform.python_version()}" in log
         assert "unavailable" not in log
 
     @pytest.mark.parametrize("missing", ["package", "executable"])
@@ -422,7 +471,7 @@ class TestToolNames:
             assert output.command([python, "-m", "missing_quality_tool"]) != 0
             output.result("Example", False)
         log = output.path.read_text()
-        assert "- Version: missing_quality_tool unavailable" in log
+        assert "- Tool: missing_quality_tool unavailable" in log
 
     def test_reported_options_are_passed_to_the_process(self, tmp_path):
         """!

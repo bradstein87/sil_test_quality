@@ -15,16 +15,21 @@ class TestModuleCommand:
     @brief Check delegation from the module entry point.
     """
 
-    def test_module_preserves_arguments_and_exit_status(self, monkeypatch):
+    @pytest.mark.parametrize("width", [None, 0])
+    def test_module_preserves_arguments_and_exit_status(
+        self, monkeypatch, width
+    ):
         """!
         @brief Forward module arguments and the resulting exit status.
         @param monkeypatch Pytest fixture for replacing dependencies and
         restoring them afterward.
+        @param width Optional report-width override, including unframed output.
         """
         calls = []
-        monkeypatch.setattr(
-            cli.sys, "argv", ["sil_test_quality", "--fix", "--verbose"]
-        )
+        arguments = ["sil_test_quality", "--fix", "--verbose"]
+        if width is not None:
+            arguments += ["--report-width", str(width), "--wrap"]
+        monkeypatch.setattr(cli.sys, "argv", arguments)
         monkeypatch.setattr(
             cli.HookEnvironment,
             "__init__",
@@ -40,5 +45,11 @@ class TestModuleCommand:
         assert result.value.code == 7
         assert calls == [
             Path.cwd(),
-            {"fix": True, "verbose": True, "brief": False},
+            {
+                "fix": True,
+                "verbose": True,
+                "brief": False,
+                "report_width": width,
+                "wrap": width is not None,
+            },
         ]

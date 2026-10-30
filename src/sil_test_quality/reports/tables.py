@@ -58,20 +58,14 @@ class LizardReport:
 
     def lengths(self) -> tuple[str, str]:
         """!
-        @brief List of functions above the length review limit
-        @return text table of functions above the length review limit
+        @brief List functions by physical length, longest first.
+        @return Full and shortened native tables, or a notice when no functions
+        were measured. Normal mode keeps the three longest functions.
         """
         lines = self.function_table.splitlines()
-        rows = [
-            line
-            for line in lines
-            if self.ROW.match(line)
-            and int(line.split()[4]) > policy.FUNCTION_REVIEW_LINES
-        ]
+        rows = [line for line in lines if self.ROW.match(line)]
         if not rows:
-            return (
-                f"- No functions above {policy.FUNCTION_REVIEW_LINES} lines.",
-            ) * 2
+            return ("- No functions measured.",) * 2
         rows.sort(key=lambda row: int(row.split()[4]), reverse=True)
         header = next(
             line for line in lines if line.lstrip().startswith("NLOC")

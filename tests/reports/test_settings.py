@@ -15,6 +15,20 @@ class TestSettingsReport:
     @brief Preserve native settings and show useful values in normal mode.
     """
 
+    def test_effective_configuration_is_complete_in_verbose_output(self):
+        """!
+        @brief Keep the full config while limiting the normal preview.
+        """
+        settings = {f"rule_{number}": True for number in range(5)}
+        full, normal = SettingsReport.configuration(settings, "Additions")
+        assert all(f"rule_{number}" in full for number in range(5))
+        assert "rule_2" in normal and "rule_3" not in normal
+        assert normal.endswith("...")
+        assert SettingsReport.configuration({}, "Additions") == (
+            "\nAdditions:\nNone",
+            "\nAdditions:\nNone",
+        )
+
     def test_resolved_values_and_shared_row_limit(self, monkeypatch):
         """!
         @brief Keep file context and use the shared limit for setting rows.

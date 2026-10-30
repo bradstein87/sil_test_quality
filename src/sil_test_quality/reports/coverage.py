@@ -51,8 +51,8 @@ class CoverageReport:
             if "%" in line and not line.startswith("TOTAL"):
                 count += 1
                 if count > policy.NORMAL_ROWS:
+                    if count == policy.NORMAL_ROWS + 1:
+                        normal.append("...")
                     continue
             normal.append(line)
-        if count > policy.NORMAL_ROWS:
-            normal.append("...")
         return full, "\n".join(normal)

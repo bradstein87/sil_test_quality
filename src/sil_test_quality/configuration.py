@@ -7,6 +7,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from .table import ReportTable
+
 # Limits used by checks and their report descriptions.
 MAX_FILE_LINES = 500
 MAX_LINE_COLUMNS = 80
@@ -26,33 +28,31 @@ class CheckSettings:
     def __init__(self, root: Path) -> None:
         """!
         @brief Load checker settings and fill in defaults.
-        @param root Repo whose pyproject.toml supplies version, test and
+        @param root Repo whose pyproject.toml supplies version, report and
         coverage settings.
         @throws ValueError A setting has an unsupported name, type, version
         format or path.
         """
         options = self.read_options(root)
         self.version = options.get("version")
-        self.test_label = options.get("test-label", "Software tests")
         self.coverage_omit = options.get("coverage-omit", [])
         self.version_file = options.get("version-file", "")
+        self.report_width = options.get(
+            "report-width", ReportTable.DEFAULT_WIDTH
+        )
+        ReportTable.validate_width(self.report_width)
         if not isinstance(self.version, str) or not re.fullmatch(
             r"\d+\.\d+\.\d+", self.version
         ):
             raise ValueError("sil-test-quality.version must be an exact X.Y.Z")
-        if not isinstance(self.test_label, str) or not self.test_label.strip():
-            raise ValueError(
-                "sil-test-quality.test-label must be nonempty text"
-            )
         self.validate_paths()
 
     @staticmethod
     def read_options(root: Path) -> dict[str, Any]:
         """!
-        @brief Read the supported settings from pyproject.toml.
+        @brief Read the repo's checker settings.
         @param root Repo directory used to locate the configuration file.
-        @return Dictionary of tool.sil-test-quality settings. Empty when the
-        file or table is absent.
+        @return Supported settings from the tool.sil-test-quality table.
         @throws ValueError The checker section is not a table or contains
         unsupported keys.
         """
@@ -61,7 +61,7 @@ class CheckSettings:
         options = data.get("tool", {}).get("sil-test-quality", {})
         if not isinstance(options, dict):
             raise ValueError("tool.sil-test-quality must be a table")
-        allowed = {"version", "test-label", "coverage-omit", "version-file"}
+        allowed = {"version", "coverage-omit", "version-file", "report-width"}
         unknown = options.keys() - allowed
         if unknown:
             raise ValueError(

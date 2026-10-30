@@ -16,6 +16,7 @@ class TestDiagnosticReport:
         """
         text = "\n".join(
             [
+                "Checking project sources",
                 "src/one.py:1: error: single type error",
                 "src/many.py:1: error: first type error",
                 "    source context",
@@ -28,25 +29,29 @@ class TestDiagnosticReport:
         )
         full, normal = DiagnosticReport().render(text)
         assert full == text
-        assert normal.startswith("src/syntax.py")
+        assert normal.startswith("Checking project sources\nsrc/syntax.py")
         assert "src/one.py" not in normal and "third type" not in normal
         assert "source context" in normal and "help: repair" in normal
-        assert "Found 5 errors." in normal
-        assert "..." in normal
+        assert normal.endswith("...\nFound 5 errors.")
 
     def test_formatting_files_and_unstructured_errors(self):
         """!
         @brief Handle formatter output and messages without locations.
         """
-        text = "\n".join(f"Would reformat: src/{name}.py" for name in "abcd")
+        text = "\n".join(
+            [f"Would reformat: src/{name}.py" for name in "abcd"]
+            + ["4 files would be reformatted"]
+        )
         full, normal = DiagnosticReport().render(text)
         assert full == text and "src/d.py" not in normal
+        assert normal.endswith("...\n4 files would be reformatted")
         full, normal = DiagnosticReport().render(
-            "one\ntwo\nthree\nfour\nERROR tool failed"
+            "Checking project\none\ntwo\nthree\nERROR tool failed\n"
+            "four\nChecked 5 files"
         )
-        assert full.endswith("ERROR tool failed")
-        assert normal.startswith("ERROR tool failed")
-        assert "..." in normal
+        assert full.endswith("Checked 5 files")
+        assert normal.startswith("Checking project\nERROR tool failed")
+        assert normal.endswith("...\nChecked 5 files")
         assert DiagnosticReport().render("All checks passed!") == (
             "All checks passed!",
             "All checks passed!",

@@ -23,17 +23,15 @@ class TestCheckSettings:
         )
         defaults = CheckSettings(tmp_path)
         assert defaults.version == "0.1.0"
-        assert defaults.test_label == "Software tests"
         assert defaults.coverage_omit == []
+        assert defaults.report_width == 128
         (tmp_path / "pyproject.toml").write_text(
             '[tool.sil-test-quality]\nversion = "0.2.0"\n'
-            'test-label = "Library tests"\n'
             'coverage-omit = ["src/product_cases/*"]\n'
             'version-file = "src/example/__init__.py"\n'
         )
         configured = CheckSettings(tmp_path)
         assert configured.version == "0.2.0"
-        assert configured.test_label == "Library tests"
         assert configured.coverage_omit == ["src/product_cases/*"]
         assert configured.version_file == "src/example/__init__.py"
 
@@ -56,8 +54,11 @@ class TestCheckSettings:
         [
             'version = "latest"',
             "version = 1",
-            'test-label = " "',
-            "test-label = []",
+            'test-label = "Library tests"',
+            "report-width = -1",
+            "report-width = 19",
+            "report-width = true",
+            'report-width = "120"',
             'coverage-omit = "src/*"',
             "coverage-omit = [1]",
             'coverage-omit = ["../elsewhere/*"]',
@@ -88,6 +89,19 @@ class TestCheckSettings:
         )
         with pytest.raises(ValueError):
             CheckSettings(tmp_path)
+
+    @pytest.mark.parametrize("width", [0, 80, 160])
+    def test_report_width_is_a_consumer_setting(self, tmp_path, width):
+        """!
+        @brief Read the requested width from the consuming repo.
+        @param tmp_path Repo containing the report setting.
+        @param width Unframed output or a supported positive width.
+        """
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sil-test-quality]\nversion = "0.2.0"\n'
+            f"report-width = {width}\n"
+        )
+        assert CheckSettings(tmp_path).report_width == width
 
     def test_invalid_table_is_rejected(self, tmp_path):
         """!

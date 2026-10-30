@@ -30,42 +30,53 @@ class TestReport:
         """!
         @brief Prepare the most critical PyTest results & sessions totals
         @param text PyTest console output, outcomes & totals to pick priorities
-        @return Output for verbose and normal mode with top results for normal
+        @return Full output and a normal view with session context, up to three
+        prioritized native results, and the final totals.
         """
         lines = text.splitlines()
-        rows, summaries = {}, []
-        context, totals = [], []
+        rows: dict[tuple[str, str], str] = {}
+        summaries = []
+        context = []
+        totals = []
         for line in lines:
             result = self.RESULT.match(line)
             summary = self.SUMMARY.match(line)
             if result:
-                rows[result[1]] = (self.PRIORITY[result[2]], line)
+                rows[result[1], result[2]] = line
             elif summary:
-                summaries.append((self.PRIORITY[summary[1]], line))
+                summaries.append((summary[1], line))
+            elif re.match(r"=+ .* in [\d.]+s", line):
+                totals.append(line)
             elif line.startswith(
                 (
-                    "platform ",
                     "rootdir:",
                     "configfile:",
-                    "plugins:",
+                    "testpaths:",
                     "collected ",
+                    "collecting ",
                 )
             ):
                 context.append(line)
-            elif re.match(r"=+ .* in [\d.]+s", line):
-                totals.append(line)
         # Short summaries add the exception/reason missing from progress rows.
-        for priority, line in summaries:
-            node = line.split(" ", 1)[1].split(" - ", 1)[0]
-            rows[node] = (priority, line)
-        ranked = sorted(rows.values(), key=lambda row: row[0])
-        if not ranked:
+        for status, line in summaries:
+            message = line.split(" ", 1)[1]
+            node = message.split(" - ", 1)[0]
+            for candidate, outcome in rows:
+                if outcome == status and message.startswith(candidate + " - "):
+                    node = candidate
+                    break
+            rows[node, status] = line
+        if not rows:
             return DiagnosticReport().render(text)
-        normal = (
-            totals
-            + context
-            + [line for _, line in ranked[: policy.NORMAL_ROWS]]
+        ranked = sorted(
+            (
+                (self.PRIORITY[status], line)
+                for (_, status), line in rows.items()
+            ),
+            key=lambda row: row[0],
         )
+        normal = context + [line for _, line in ranked[: policy.NORMAL_ROWS]]
         if len(ranked) > policy.NORMAL_ROWS:
             normal.append("...")
+        normal.extend(totals)
         return text, "\n".join(normal)

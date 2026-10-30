@@ -9,6 +9,7 @@ from pathlib import Path
 from . import configuration as policy
 from .docstrings import DoxygenDocstrings
 from .output import CheckOutput
+from .policy import ToolPolicy
 from .quality import ComplexityChecks, CoverageChecks
 from .report import QualityReport
 from .reports.diagnostics import DiagnosticReport
@@ -38,9 +39,15 @@ class RepositoryChecks:
         self.settings = policy.CheckSettings(self.root)
         self.source = ProjectSource(self.root)
         self.exclusions = self.source.exclusions
+        self.tool_policy: ToolPolicy | None = None
 
     def run(
-        self, fix: bool = False, verbose: bool = False, brief: bool = False
+        self,
+        fix: bool = False,
+        verbose: bool = False,
+        brief: bool = False,
+        report_width: int | None = None,
+        wrap: bool = False,
     ) -> int:
         """!
         @brief Run the checks and produce the precommit report.
@@ -49,11 +56,18 @@ class RepositoryChecks:
         @param fix True to repair imports and formatting before checking.
         @param verbose True to show complete console evidence.
         @param brief True to show verdicts and the final summary only.
+        @param report_width Run-specific width, or None to use the repo setting.
+        @param wrap Wrap long console lines instead of clipping them.
         @return Exit status for Git: zero when checks pass, one when any
         required check fails.
         """
 
-        with CheckOutput(self.root, verbose, brief=brief) as output:
+        width = (
+            self.settings.report_width if report_width is None else report_width
+        )
+        with CheckOutput(
+            self.root, verbose, brief=brief, width=width, wrap=wrap
+        ) as output:
             return self._run(output, fix)
 
     def ruff_exclusions(self) -> list[str]:
@@ -88,7 +102,7 @@ class RepositoryChecks:
             output.start(label)
             status = output.command(
                 [sys.executable, "-m", "ruff", operation],
-                options=[*args, ".", *exclusions],
+                options=[*args, ".", *self.tool_arguments("ruff"), *exclusions],
             )
             output.result(label, status == 0)
 
@@ -104,6 +118,8 @@ class RepositoryChecks:
         failure.
         """
         exclusions = self.ruff_exclusions()
+        if not self.check_settings(output, exclusions):
+            return output.finish()
         if fix:
             self.repair(output, exclusions)
         report = QualityReport(self.source)
@@ -112,14 +128,16 @@ class RepositoryChecks:
         for name in (".coverage", "coverage.json", "unit-tests.xml"):
             (self.root / "artifacts" / name).unlink(missing_ok=True)
         self.check_files(output)
+        ComplexityChecks(self.source, output).run()
         self.check_width(output)
+        self.check_formatting(output, exclusions)
+        self.check_style(output, exclusions)
         suppressions = self.check_structure(output)
         DoxygenDocstrings().run(self.source, output)
-        ComplexityChecks(self.source, output).run()
-        self.check_settings(output, exclusions)
-        self.check_style(output, exclusions)
-        self.check_formatting(output, exclusions)
         self.check_types(output)
+        # Coverage needs the tests to run first. Consistency checks both stages
+        # before their completed blocks are displayed in the requested order.
+        output.defer("Coverage", "Tests")
         self.check_tests(output)
         output.detail(
             "- Coverage omissions: "
@@ -137,19 +155,26 @@ class RepositoryChecks:
         results.
         """
         output.start("Files")
-        sizes = sorted(
-            self.source.sizes(),
-            key=lambda row: int(row.rsplit(": ", 1)[1].split()[0]),
-            reverse=True,
-        )
+        sizes = self.source.sizes()
+        problems = [
+            f"{name}: {lines} lines (limit is {policy.MAX_FILE_LINES})"
+            for name, lines in sorted(
+                sizes.items(), key=lambda row: row[1], reverse=True
+            )
+            if lines > policy.MAX_FILE_LINES
+        ]
         output.detail(
             f"- File length: <= {policy.MAX_FILE_LINES} physical lines"
         )
         output.detail(
-            "\n".join(sizes), normal="\n".join(sizes[: policy.NORMAL_ROWS])
+            f"- Measured: {len(sizes)} text files, "
+            f"longest {max(sizes.values(), default=0)} lines"
         )
-        output.detail(f"- Files over limit: {len(sizes)}")
-        output.result("Files", not sizes)
+        normal = problems[: policy.NORMAL_ROWS]
+        if len(problems) > policy.NORMAL_ROWS:
+            normal.append("...")
+        output.detail("\n".join(problems), normal="\n".join(normal))
+        output.result("Files", not problems)
 
     def check_width(self, output: CheckOutput) -> None:
         """!
@@ -158,17 +183,19 @@ class RepositoryChecks:
         Normal mode shows three findings, and verbose mode shows all of them.
         """
         output.start("Width")
-        problems = self.source.line_widths()
+        problems, widths = self.source.line_widths()
         output.detail(f"- Line width: <= {policy.MAX_LINE_COLUMNS} columns")
         output.detail("- Scope: .py, .pyi and .pyw files, including tests")
         output.detail("- Includes: code, comments, docstrings and indentation")
         output.detail("- Tabs: four-column stops")
-        output.detail("- Order: widest first, read errors first")
         normal = problems[: policy.NORMAL_ROWS]
         if len(problems) > policy.NORMAL_ROWS:
             normal.append("...")
         output.detail("\n".join(problems), normal="\n".join(normal))
-        output.detail(f"- Width issues: {len(problems)}")
+        output.detail(
+            f"- Measured: {len(widths)} Python files, "
+            f"widest {max(widths.values(), default=0)} columns"
+        )
         output.result("Width", not problems)
 
     def check_structure(self, output: CheckOutput) -> list[str]:
@@ -186,35 +213,64 @@ class RepositoryChecks:
         output.detail("- Comments: no unfinished-work markers")
         full, normal = DiagnosticReport().render("\n".join(problems))
         output.detail(full, normal=normal)
-        output.detail(f"- Violations: {len(problems)}")
+        count = sum(path.suffix == ".py" for path in self.source.files())
+        output.detail(f"- Python files in scope: {count}")
         output.result("Structure", not problems)
         return suppressions
 
     def check_settings(
         self, output: CheckOutput, exclusions: list[str]
-    ) -> None:
+    ) -> bool:
         """!
         @brief Report Ruff's resolved settings and selected rule descriptions.
         @param output Report recorder receiving the settings and result.
         @param exclusions Arguments used by the lint and formatting commands.
+        @return True when the policy and native Ruff settings are valid.
         """
         output.start("Settings")
+        try:
+            self.tool_policy = ToolPolicy(self.root)
+            arguments = self.tool_arguments("ruff")
+        except (ValueError, OSError) as error:
+            output.detail(f"- Configuration error: {error}")
+            output.result("Settings", False)
+            return False
         report = SettingsReport()
+        output.detail(f"- Baseline: {self.tool_policy.baseline}")
+        full, normal = report.configuration(
+            self.tool_policy.additions, "Consumer additions"
+        )
+        output.detail(full, normal=normal)
+        full, normal = report.configuration(
+            self.tool_policy.settings["mypy"], "Effective mypy settings"
+        )
+        output.detail(full, normal=normal)
         status = output.command(
             [sys.executable, "-m", "ruff", "check"],
-            options=["--show-settings", ".", *exclusions],
+            options=["--show-settings", ".", *arguments, *exclusions],
             view=report.render,
             literal=True,
         )
         if status == 0:
-            output.detail("- Prefix selections expand to individual rule codes")
             status = output.command(
                 [sys.executable, "-m", "ruff", "rule"],
                 options=["--all", "--output-format", "json"],
                 view=report.describe_rules,
                 literal=True,
             )
-        output.result("Settings", status == 0 and report.rules_complete)
+        passed = status == 0 and report.rules_complete
+        output.result("Settings", passed)
+        return passed
+
+    def tool_arguments(self, tool: str) -> list[str]:
+        """!
+        @brief Use the same policy for checks, settings and repairs.
+        @param tool Ruff or mypy command name in lowercase.
+        @return Arguments selecting the generated tool configuration.
+        """
+        if self.tool_policy is None:
+            self.tool_policy = ToolPolicy(self.root)
+        return self.tool_policy.arguments(tool)
 
     def check_formatting(
         self, output: CheckOutput, exclusions: list[str]
@@ -229,10 +285,9 @@ class RepositoryChecks:
         tool failure.
         """
         output.start("Formatting")
-        output.detail("- Whitespace and layout: repository formatting rules")
         status = output.command(
             [sys.executable, "-m", "ruff", "format"],
-            options=["--check", ".", *exclusions],
+            options=["--check", ".", *self.tool_arguments("ruff"), *exclusions],
         )
         if status:
             output.detail("- Fix: git hook run pre-commit -- --fix")
@@ -241,7 +296,7 @@ class RepositoryChecks:
 
     def check_style(self, output: CheckOutput, exclusions: list[str]) -> bool:
         """!
-        @brief Check source style with the repo's Ruff rules.
+        @brief Check source style with shared rules and repository additions.
         @param output Report recorder receiving this check's evidence and
         results.
         @param exclusions Arguments from ruff_exclusions telling Ruff which
@@ -251,12 +306,14 @@ class RepositoryChecks:
 
         label = "Lint"
         output.start(label)
-        output.detail(
-            "- Naming, imports and source style: repository lint rules"
-        )
         status = output.command(
             [sys.executable, "-m", "ruff", "check"],
-            options=["--output-format=concise", ".", *exclusions],
+            options=[
+                "--output-format=concise",
+                ".",
+                *self.tool_arguments("ruff"),
+                *exclusions,
+            ],
         )
         output.result(label, status == 0)
         return status == 0
@@ -274,8 +331,6 @@ class RepositoryChecks:
             for path in self.source.files()
             if path.suffix == ".py" and path.is_relative_to(self.root / "src")
         ]
-        output.detail("- Function interfaces: parameter and return type checks")
-        output.detail(f"- Source files: {len(files)}")
         if not files:
             output.detail("No source files were found for type checking")
             output.result("Types", False)
@@ -285,7 +340,7 @@ class RepositoryChecks:
         arguments.write_text("\n".join(files) + "\n", encoding="utf-8")
         status = output.command(
             [sys.executable, "-m", "mypy"],
-            options=["--follow-imports=silent", "@" + str(arguments)],
+            options=[*self.tool_arguments("mypy"), "@" + str(arguments)],
         )
         output.result("Types", status == 0)
 
@@ -300,9 +355,9 @@ class RepositoryChecks:
         """
 
         output.start("Tests")
+        targets = ["tests"]
+        output.detail(f"- Test selection: {', '.join(targets)}")
         omit = self.settings.coverage_omit + self.exclusions
-        output.detail(f"- Suite: {self.settings.test_label}")
-        output.detail("- Software tests: no test failures or execution errors")
         options = [
             "--branch",
             f"--data-file={self.root / 'artifacts/.coverage'}",
@@ -313,7 +368,7 @@ class RepositoryChecks:
         options += [
             "-m",
             "pytest",
-            "tests",
+            *targets,
             "-v",
             "-ra",
             "--junitxml=artifacts/unit-tests.xml",

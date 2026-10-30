@@ -141,49 +141,46 @@ class ProjectSource:
             digest.update(hashlib.sha256(content).digest())
         return digest.hexdigest()
 
-    def sizes(self) -> list[str]:
+    def sizes(self) -> dict[str, int]:
         """!
-        @brief Find text files over the shared length limit.
-        @return Messages with filenames and line counts for the Files section.
-        Empty when none exceed the limit.
+        @brief Measure text file lengths.
+        @return Relative filenames and physical line counts. Generated and
+        binary files are omitted.
         """
 
-        problems = []
+        sizes = {}
         for path in self.files():
             try:
                 content = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
-            if (
-                "\0" not in content
-                and len(content.splitlines()) > policy.MAX_FILE_LINES
-            ):
-                relative = path.relative_to(self.root)
-                problems.append(
-                    f"{relative}: {len(content.splitlines())} lines "
-                    f"(limit is {policy.MAX_FILE_LINES})"
-                )
-        return problems
+            if "\0" not in content:
+                relative = path.relative_to(self.root).as_posix()
+                sizes[relative] = len(content.splitlines())
+        return sizes
 
-    def line_widths(self) -> list[str]:
+    def line_widths(self) -> tuple[list[str], dict[str, int]]:
         """!
         @brief Find Python lines that exceed the column limit.
         @details Counts indentation, comments and docstrings. Tabs advance to
         four-column stops. URLs, long names and noqa comments get no exception.
         Generated content and declared legacy exclusions remain outside scope.
-        @return Findings with file, line and column count, widest first. Read
-        failures are also reported so an unreadable file cannot pass.
+        @return Findings followed by each readable file's maximum width.
+        Findings put read errors first, then overlong lines, widest first.
         """
         findings = []
         errors = []
+        widths = {}
         for path in self.files():
             if path.suffix not in {".py", ".pyi", ".pyw"}:
                 continue
             relative = path.relative_to(self.root).as_posix()
             try:
+                maximum = 0
                 with tokenize.open(path) as stream:
                     for number, line in enumerate(stream, 1):
                         width = len(line.rstrip("\r\n").expandtabs(4))
+                        maximum = max(maximum, width)
                         if width > policy.MAX_LINE_COLUMNS:
                             findings.append(
                                 (
@@ -192,10 +189,11 @@ class ProjectSource:
                                     f"(limit is {policy.MAX_LINE_COLUMNS})",
                                 )
                             )
+                widths[relative] = maximum
             except (OSError, SyntaxError, UnicodeError) as error:
                 errors.append(f"{relative}:1: cannot measure lines: {error}")
         findings.sort(key=lambda finding: finding[0], reverse=True)
-        return errors + [message for _, message in findings]
+        return errors + [message for _, message in findings], widths
 
     def inspect(self) -> tuple[list[str], list[str]]:
         """!
@@ -222,7 +220,8 @@ class ProjectSource:
                     if re.search(r"\b(TODO|FIXME)\b", token.string, re.I):
                         problems.append(f"{location}: unfinished work comment")
                     if re.search(
-                        r"noqa|type:\s*ignore|pragma:\s*no (cover|branch)",
+                        r"noqa|type:\s*ignore|mypy:"
+                        r"|pragma:\s*no (cover|branch)",
                         token.string,
                         re.I,
                     ):

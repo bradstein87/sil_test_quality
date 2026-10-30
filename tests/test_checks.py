@@ -156,9 +156,9 @@ class TestRepositoryChecks:
         (cases / "__init__.py").touch()
         (cases / "test_product.py").write_text(
             '"""! @brief Example product cases."""\n\n\n'
-            "def test_product():\n"
+            "def test_product() -> None:\n"
             '    """! @brief Deliberately fail the product case."""\n'
-            "    assert False\n"
+            '    raise AssertionError("Product failed")\n'
         )
         assert RepositoryChecks(root).run(verbose=True) == 0
         assert "100.00%" in capfd.readouterr().out
@@ -188,9 +188,13 @@ class TestRepositoryChecks:
         assert "Failed sections:" not in output
         assert "Verbose: git hook run pre-commit" not in output
         assert re.search(r"\| Tests +PASS \|", output)
-        assert "test session starts" not in output
+        assert "Suite:" not in output and "Wrote JSON" not in output
+        assert "Test selection: tests" in output
+        assert "::test_answer PASSED" in output
+        assert "1 passed" in output and "collected 1 item" in output
         log = checked_project / "artifacts/precommit.log"
         assert "1 passed" in log.read_text()
+        assert "Wrote JSON report" in log.read_text()
 
         (checked_project / "notes.txt").write_text("line\n" * 501)
         (checked_project / "tests/test_example.py").write_text(
@@ -243,57 +247,55 @@ class TestReportedSettings:
     @brief Check that report settings match the configuration tools apply.
     """
 
-    def test_ruff_reports_inherited_settings(self, checked_project):
+    def test_ruff_reports_shared_and_consumer_settings(self, checked_project):
         """!
-        @brief Read line widths and extended rules from Ruff itself.
-        @param checked_project Sample repo used to load an inherited Ruff file.
+        @brief Report effective rules from the actual generated configuration.
+        @param checked_project Repo with a narrower width and an added rule.
         """
-        (checked_project / "ruff.toml").write_text(
-            'line-length = 100\n[lint]\nextend-select = ["B006"]\n'
-            '[lint.per-file-ignores]\n"src/example.py" = ["F401"]\n'
-        )
         manifest = checked_project / "pyproject.toml"
         with manifest.open("a") as stream:
-            stream.write('\n[tool.ruff]\nextend = "ruff.toml"\n')
+            stream.write(
+                "\n[tool.ruff]\nline-length = 72\n"
+                '[tool.ruff.lint]\nextend-select = ["T201"]\n'
+            )
         with CheckOutput(checked_project) as output:
-            RepositoryChecks(checked_project).check_settings(output, [])
-            assert output.results["Settings"] == "PASS"
+            assert RepositoryChecks(checked_project).check_settings(output, [])
         log = output.path.read_text()
-        assert "linter.line_length = 100" in log
-        assert "formatter.line_width = 100" in log
-        assert "B006" in log and "F401" in log
-        assert "B006 (mutable-argument-default)" in log
-        assert "linter.per_file_ignores" in log
-        assert "Line width: 88" not in log
+        assert "linter.line_length = 72" in log
+        assert "formatter.line_width = 72" in log
+        assert "PLC0415 (import-outside-top-level)" in log
+        assert "T201 (print)" in log
+        assert "Effective mypy settings" in log
+        assert "Consumer additions" in log
 
-    def test_invalid_ruff_settings_fail_the_section(self, checked_project):
+    def test_conflicting_config_stops_before_repairs(self, checked_project):
         """!
-        @brief Report a settings failure rather than inventing default values.
-        @param checked_project Sample repo containing a broken Ruff file.
+        @brief Reject weakened settings before tools can edit source files.
+        @param checked_project Repo containing a conflicting Ruff setting.
         """
-        (checked_project / "ruff.toml").write_text("line-length = invalid\n")
-        with CheckOutput(checked_project) as output:
-            RepositoryChecks(checked_project).check_settings(output, [])
-            assert output.results["Settings"] == "FAIL"
-        assert "TOML parse error" in output.path.read_text()
+        manifest = checked_project / "pyproject.toml"
+        with manifest.open("a") as stream:
+            stream.write('\n[tool.ruff.lint]\nignore = ["PLC0415"]\n')
+        path = checked_project / "src/example.py"
+        original = path.read_text()
+        assert RepositoryChecks(checked_project).run(fix=True) == 1
+        assert path.read_text() == original
+        log = (checked_project / "artifacts/precommit.log").read_text()
+        assert "tool.ruff.lint.ignore" in log
 
-    def test_prefix_selections_include_only_enabled_rules(
-        self, checked_project
-    ):
+    def test_invalid_rule_fails_settings(self, checked_project):
         """!
-        @brief Expand prefixes using Ruff and leave ignored rules out.
-        @param checked_project Sample repo with a prefix and an ignored rule.
+        @brief Let Ruff reject unknown rule names before checks run.
+        @param checked_project Repo containing a nonexistent extra lint rule.
         """
-        (checked_project / "ruff.toml").write_text(
-            '[lint]\nselect = ["E4", "E501"]\nignore = ["E402"]\n'
-        )
+        manifest = checked_project / "pyproject.toml"
+        with manifest.open("a") as stream:
+            stream.write('\n[tool.ruff.lint]\nextend-select = ["BOGUS"]\n')
         with CheckOutput(checked_project) as output:
-            RepositoryChecks(checked_project).check_settings(output, [])
-            assert output.results["Settings"] == "PASS"
-        log = output.path.read_text()
-        assert "E401 (multiple-imports-on-one-line)" in log
-        assert "E501 (line-too-long)" in log
-        assert "E402 (module-import-not-at-top-of-file)" not in log
+            assert not RepositoryChecks(checked_project).check_settings(
+                output, []
+            )
+        assert output.results["Settings"] == "FAIL"
 
     def test_missing_rule_metadata_fails_settings(
         self, checked_project, monkeypatch
@@ -363,7 +365,7 @@ class TestWidthReport:
         console = capsys.readouterr().out
         log = output.path.read_text()
         assert re.search(r"\| Width +FAIL \|", console)
-        assert "- Width issues: 4" in log
+        assert "Measured: 3 Python files, widest 84 columns" in log
         for number in range(1, 5):
             finding = f"sample.py:{number}: {80 + number} columns"
             assert finding in log
@@ -403,6 +405,43 @@ class TestCheckFailures:
     """!
     @brief Check that tool and source failures block the commit.
     """
+
+    def test_consistency_still_detects_changes_during_tests(
+        self, checked_project, monkeypatch, capfd
+    ):
+        """!
+        @brief Keep source-change detection despite reordered report blocks.
+        @param checked_project Sample repo with passing source and tests.
+        @param monkeypatch Add a source edit after test execution.
+        @param capfd Capture the completed report for ordering checks.
+        """
+        checks = RepositoryChecks(checked_project)
+        check_tests = checks.check_tests
+
+        def run_and_edit(output):
+            """!
+            @brief Change a checked file after collecting test measurements.
+            @param output Recorder used by the real test stage.
+            """
+            check_tests(output)
+            (checked_project / "changed.py").write_text("VALUE = 1\n")
+
+        monkeypatch.setattr(checks, "check_tests", run_and_edit)
+        assert checks.run() == 1
+        console = capfd.readouterr().out
+        log = (checked_project / "artifacts/precommit.log").read_text()
+        for text in (console, log):
+            assert re.search(r"\| Consistency +FAIL \|", text)
+            labels = re.findall(r"^\| (\w+) +(?:PASS|FAIL) \|", text, re.M)
+            assert labels[-5:] == [
+                "Types",
+                "Consistency",
+                "Coverage",
+                "Tests",
+                "Result",
+            ]
+            assert labels[labels.index("Length") + 1] == "Width"
+            assert "Warnings" not in text
 
     def test_failed_lint_tool_blocks_the_check(
         self, checked_project, monkeypatch

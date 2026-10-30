@@ -32,6 +32,8 @@ class CheckOutput:
         filename: str = "precommit.log",
         *,
         brief: bool = False,
+        width: int = ReportTable.DEFAULT_WIDTH,
+        wrap: bool = False,
     ) -> None:
         """!
         @brief Set the report destination and console detail level.
@@ -42,6 +44,8 @@ class CheckOutput:
         @param filename Log name under artifacts. Defaults to precommit.log.
         @param brief True to hide check evidence and keep verdicts and the final
         summary.
+        @param width Report columns, or zero for unframed text without wrapping.
+        @param wrap Wrap console lines. The saved log always keeps full text.
         """
 
         self.root = root
@@ -52,9 +56,12 @@ class CheckOutput:
         self.results: dict[str, str] = {}
         self.pending: list[str] = []
         self.normal: list[str] = []
+        self.tools: set[str] = set()
         self.advisories: dict[str, list[str]] = {}
-        self.table = ReportTable()
-        self.activity = CheckActivity()
+        self.deferred: dict[str, tuple[str, list[str]] | None] = {}
+        self.table = ReportTable(width, wrap=wrap)
+        self.log_table = ReportTable(width, wrap=True)
+        self.activity = CheckActivity(self.table)
 
     def __enter__(self) -> "CheckOutput":
         """!
@@ -78,6 +85,7 @@ class CheckOutput:
             self.section(
                 self.activity.label or "Incomplete", "ERROR", always=True
             )
+        self.release()
         self.log.close()
 
     def start(self, label: str) -> None:
@@ -115,27 +123,62 @@ class CheckOutput:
     def section(self, label: str, status: str, *, always: bool = False) -> None:
         """!
         @brief Print and save one completed report block.
-        @details Stops the running indicator, flushes the full block to the log
-        and clears the evidence for the next section.
+        @details Stops the running indicator and clears the evidence for the
+        next section. Deferred blocks are held until release.
         @param label Section name shown at the left of the header.
         @param status Result text shown on the right. May be empty for a plain
         heading.
         @param always True to show this section's evidence even in brief mode.
         """
-        active = self.activity.stop()
-        full = "\n".join(self.table.render(label, status, self.pending))
-        self.log.write(full + "\n")
-        self.log.flush()
+        deferred = label in self.deferred
+        active = self.activity.stop(discard=deferred)
+        full = "\n".join(self.log_table.render(label, status, self.pending))
         body = self.pending if self.verbose else self.normal
         if self.brief and not always:
             body = []
         visible = list(self.table.render(label, status, body))
-        print(
-            "\r" + "\n".join(visible[1:]) if active else "\n".join(visible),
-            flush=True,
-        )
+        if deferred:
+            self.deferred[label] = (full, visible)
+        else:
+            self._write(full, visible, active=active)
         self.pending.clear()
         self.normal.clear()
+        self.tools.clear()
+
+    def defer(self, *labels: str) -> None:
+        """!
+        @brief Hold completed blocks for display in the requested order.
+        @param labels Section names in display order. Checks still execute in
+        their original order and keep their running indicators.
+        """
+        self.deferred.update(dict.fromkeys(labels))
+
+    def release(self) -> None:
+        """!
+        @brief Print held blocks without changing their evidence or verdicts.
+        """
+        for block in self.deferred.values():
+            if block is not None:
+                self._write(*block)
+        self.deferred.clear()
+
+    def _write(
+        self, full: str, visible: list[str], *, active: bool = False
+    ) -> None:
+        """!
+        @brief Save the full block and print the selected console view.
+        @param full Complete evidence formatted for the saved log.
+        @param visible Rows selected for the current console detail level.
+        @param active True to replace a running header already on screen.
+        """
+        self.log.write(full + "\n\n")
+        self.log.flush()
+        if active:
+            visible = visible[1:] if self.table.width else visible
+            visible[0] = "\r" + visible[0]
+        print(
+            "\n".join(visible), end="\n" if self.brief else "\n\n", flush=True
+        )
 
     @staticmethod
     def tool_name(command: list[str]) -> str:
@@ -197,6 +240,7 @@ class CheckOutput:
         options: Sequence[str] = (),
         view: Callable[[str], tuple[str, str]] | None = None,
         literal: bool = False,
+        quiet_success: bool = False,
     ) -> int:
         """!
         @brief Run a tool and collect its output for the report.
@@ -208,6 +252,8 @@ class CheckOutput:
         @param view Function converting captured output to full/normal strings.
         Defaults to DiagnosticReport.
         @param literal True to keep native table layout in the captured output.
+        @param quiet_success True to keep successful command output in verbose
+        mode and the log only. Failures remain visible in normal mode.
         @return Tool exit code for the check to evaluate, or one if the tool
         cannot start.
         """
@@ -233,18 +279,16 @@ class CheckOutput:
             full, normal = (view or DiagnosticReport().render)(
                 result.stdout or ""
             )
-            if full:
-                separator = "\n" if literal else " "
-                self.detail(
-                    f"{tool} output:{separator}{full}",
-                    normal=f"{tool} output:{separator}{normal}",
-                    literal=literal,
-                )
             status = result.returncode
         except OSError as error:
-            self.detail(str(error))
+            full = normal = str(error)
             status = 1
         self._command_details(command, tool, options, status, environment)
+        self.detail(
+            full,
+            normal="" if quiet_success and status == 0 else normal,
+            literal=literal,
+        )
         return status
 
     def _command_details(
@@ -263,18 +307,25 @@ class CheckOutput:
         @param status Tool exit code, or one if it could not run.
         @param environment Variables used by the tool and its version lookup.
         """
-        self.detail(f"- Tool: {tool}")
+        identity = f"{tool} (version unavailable)"
         if self.is_python(command[0]):
             module, _ = self._module(command[1:])
             packages = tool.split(" / ") if module else [""]
+            versions = []
             for package in packages:
                 installed = self._tool_version(command, package, environment)
-                self.detail(f"- Version: {installed}")
-        else:
-            self.detail("- Version: unavailable for this executable")
+                if package and installed.startswith("Python "):
+                    installed += f" ({package})"
+                versions.append(installed)
+            identity = " / ".join(versions)
+        if identity not in self.tools:
+            self.detail(f"- Tool: {identity}")
+            self.tools.add(identity)
         if options:
-            self.detail(f"- Options: {shlex.join(options)}")
-        self.detail(f"- Exit status: {status}")
+            self.detail(f"- Options: {shlex.join(options)}", normal="")
+        self.detail(
+            f"- Exit status: {status}", normal="" if status == 0 else None
+        )
 
     def _tool_version(
         self, command: list[str], package: str, environment: Mapping[str, str]
@@ -344,7 +395,7 @@ class CheckOutput:
         passing advisory.
         """
 
-        self.results[label] = "WARNING" if details else "PASS"
+        self.results[label] = "WARN" if details else "PASS"
         self.advisories[label] = details
 
     def _record(self, label: str, status: str) -> None:
@@ -360,27 +411,30 @@ class CheckOutput:
 
     def finish(self) -> int:
         """!
-        @brief Print the final result and warnings.
+        @brief Print warnings followed by the final result.
         @return One if any required check failed, otherwise zero. Warnings alone
         do not fail the commit.
         """
 
+        self.release()
+        warnings = [
+            f"- {label}: {', '.join(details)}"
+            for label, details in self.advisories.items()
+            if details
+        ]
+        warnings.extend(
+            f"- {label}: NOT RUN"
+            for label, status in self.results.items()
+            if status == "NOT RUN"
+        )
+        if warnings:
+            for message in warnings:
+                self.detail(message)
+            self.section("Warnings", "WARN", always=True)
         if self.failures:
             self.detail("Failed sections:", literal=True)
             for label in self.failures:
                 self.detail(f"- {label}")
             self.detail("Verbose: git hook run pre-commit -- --verbose")
         self.section("Result", "FAIL" if self.failures else "PASS", always=True)
-        for label, details in self.advisories.items():
-            self.detail(f"- {label}: {', '.join(details) if details else '0'}")
-        for label, status in self.results.items():
-            if status == "NOT RUN":
-                self.detail(f"- {label}: NOT RUN")
-        warnings = any(self.advisories.values()) or "NOT RUN" in (
-            self.results.values()
-        )
-        if not self.advisories and not warnings:
-            self.detail("- None")
-        status = "WARNING" if warnings else "PASS"
-        self.section("Warnings", status, always=True)
         return int(bool(self.failures))

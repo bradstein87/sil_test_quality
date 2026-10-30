@@ -76,7 +76,7 @@ class TestCoverageChecks:
         with CheckOutput(tmp_path) as output:
             notes = CoverageChecks(tmp_path, output).run(tmp_path / ".coverage")
             assert output.failures == (["Coverage"] if covered < 90 else [])
-            assert output.results["Branch coverage (advisory)"] == "WARNING"
+            assert output.results["Branch coverage (advisory)"] == "WARN"
             assert f"Statement coverage: {covered:.2f}% overall" in notes
             assert any("Branch coverage: 50.00%" in note for note in notes)
 
@@ -148,7 +148,7 @@ class TestComplexityChecks:
         with CheckOutput(tmp_path) as output:
             notes = ComplexityChecks(ProjectSource(tmp_path), output).run()
             assert bool(output.failures) == failed
-            assert f"maximum CCN {branches + 1}" in notes[0]
+            assert f"Maximum CCN: {branches + 1}" in notes[0]
         log = (tmp_path / "artifacts/precommit.log").read_text()
         assert "NLOC" in log and "CCN" in log
         assert "decisions" in log and "sample with spaces.py" in log
@@ -185,12 +185,10 @@ class TestComplexityChecks:
         with CheckOutput(tmp_path) as output:
             notes = ComplexityChecks(ProjectSource(tmp_path), output).run()
             assert not output.failures
-            assert "Lizard: 1 functions, maximum CCN 1" in notes[0]
-            assert output.results["Length"] == (
-                "WARNING" if warning else "PASS"
-            )
+            assert "Maximum CCN: 1" in notes[0]
+            assert output.results["Length"] == ("WARN" if warning else "PASS")
         log = (tmp_path / "artifacts/precommit.log").read_text()
-        assert "long_function" in log
+        assert "long_function" in log.split("| Length ")[1]
         assert "excluded@" not in log and "generated.py" not in log
 
     def test_lizard_tool_failure_is_not_an_advisory(
@@ -229,10 +227,10 @@ class TestComplexityChecks:
         with CheckOutput(tmp_path) as output:
             ComplexityChecks(ProjectSource(tmp_path), output).run()
             assert output.results["Complexity"] == "FAIL"
-            assert output.results["Length"] == "WARNING"
+            assert output.results["Length"] == "WARN"
         log = output.path.read_text()
         assert "CCN <= 2" in log and "-C2 -L4" in log
-        assert "1 above 4 lines" in log
+        assert "review above 4 physical lines" in log
         assert "choose@" in log.split("| Length ")[1]
 
 
@@ -261,7 +259,7 @@ class TestPerFileThreshold:
             with CheckOutput(tmp_path) as output:
                 CoverageChecks(tmp_path, output)._evaluate(report, "Coverage")
                 assert bool(output.failures) == failed
-                assert output.results["Branch coverage (advisory)"] == "WARNING"
+                assert output.results["Branch coverage (advisory)"] == "WARN"
 
     def test_empty_measurement_is_not_a_pass(self, tmp_path):
         """!

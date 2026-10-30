@@ -67,10 +67,7 @@ class ComplexityChecks:
             function.length > policy.FUNCTION_REVIEW_LINES
             for function in functions
         )
-        notes = [
-            f"Lizard: {len(functions)} functions, maximum CCN {maximum}, "
-            f"{long_functions} above {policy.FUNCTION_REVIEW_LINES} lines"
-        ]
+        notes = [f"Maximum CCN: {maximum}"]
         self.output.detail(notes[0])
         self.output.result(label, maximum <= policy.MAX_COMPLEXITY)
         self._report_length(report, long_functions)
@@ -95,11 +92,6 @@ class ComplexityChecks:
         self.output.detail(
             f"- Complexity: CCN <= {policy.MAX_COMPLEXITY} per function"
         )
-        self.output.detail(
-            f"- Function length: review above {policy.FUNCTION_REVIEW_LINES} "
-            "physical lines"
-        )
-        self.output.detail("- Order: functions by CCN, files by average CCN")
         return self.output.command(
             [sys.executable, "-m", "lizard"],
             options=[
@@ -119,7 +111,7 @@ class ComplexityChecks:
 
     def _report_length(self, report: LizardReport, long_functions: int) -> None:
         """!
-        @brief Report functions over the length review threshold.
+        @brief Report function lengths and record review warnings.
         @param report LizardReport populated by _invoke with this run's function
         rows.
         @param long_functions Number of functions above the review limit.
@@ -137,9 +129,8 @@ class ComplexityChecks:
         )
         self.output.detail(
             f"- Function length: review above {policy.FUNCTION_REVIEW_LINES} "
-            "physical lines"
+            "physical lines (advisory)"
         )
-        self.output.detail("- Order: longest first. Length is advisory")
         full, normal = report.lengths()
         self.output.detail(full, normal=normal, literal=True)
         self.output.section(length_label, self.output.results[length_label])
@@ -202,14 +193,12 @@ class CoverageChecks:
         status = self.output.command(
             [sys.executable, "-m", "coverage", "json"],
             options=[f"--data-file={data}", "--fail-under=0", "-o", str(path)],
+            quiet_success=True,
         )
         try:
             if status:
                 raise ValueError("Coverage could not produce a fresh report")
             report = json.loads(path.read_text(encoding="utf-8"))
-            self.output.detail(
-                "- Cover column: statements, lowest coverage first"
-            )
             full, normal = CoverageReport(self.root).render(report)
             self.output.detail(full, normal=normal, literal=True)
             return self._evaluate(report, label)
@@ -273,7 +262,8 @@ class CoverageChecks:
             f"across {len(percentages)} measured files"
         )
         notes.append(self._branches(report["totals"]))
-        for note in notes:
+        # The table already includes the overall statement percentage.
+        for note in notes[1:]:
             self.output.detail(note)
         self.output.result(label, not failed)
         return notes
@@ -289,12 +279,11 @@ class CoverageChecks:
         branches = summary["num_branches"]
         covered = summary["covered_branches"]
         percent = self.percent(summary, "covered_branches", "num_branches")
-        branch_note = (
-            f"Branch coverage: {percent:.2f}% ({covered}/{branches}), "
-            f"{branches - covered} unvisited branches"
+        counts = (
+            f"{percent:.2f}% ({covered}/{branches}), "
+            f"{branches - covered} code branches not exercised"
         )
         self.output.warning(
-            "Branch coverage (advisory)",
-            [branch_note] if covered < branches else [],
+            "Branch coverage (advisory)", [counts] if covered < branches else []
         )
-        return branch_note
+        return f"Branch coverage: {counts}"

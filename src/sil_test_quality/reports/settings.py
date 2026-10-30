@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+import tomli_w
+
 from .. import configuration as policy
 
 
@@ -20,6 +22,21 @@ class SettingsReport:
         """
         self.enabled: set[str] | None = None
         self.rules_complete = False
+
+    @staticmethod
+    def configuration(settings: dict[str, Any], title: str) -> tuple[str, str]:
+        """!
+        @brief Show configuration values supplied to the check tools.
+        @param settings Consumer additions or effective tool settings.
+        @param title Label identifying which settings are shown.
+        @return Full TOML and a normal-mode preview of three nonempty lines.
+        """
+        text = tomli_w.dumps(settings).strip() or "None"
+        lines = [line for line in text.splitlines() if line]
+        normal = lines[: policy.NORMAL_ROWS]
+        if len(lines) > len(normal):
+            normal.append("...")
+        return f"\n{title}:\n{text}", f"\n{title}:\n" + "\n".join(normal)
 
     def render(self, text: str) -> tuple[str, str]:
         """!

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from sil_test_quality import cli
+from sil_test_quality.checks import RepositoryChecks
 from sil_test_quality.output import CheckOutput
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,36 +20,101 @@ class TestReportModes:
     @brief Check report choices and command-line error handling.
     """
 
+    @pytest.mark.parametrize(
+        "width,wrap", [(0, False), (120, False), (160, True), (0, True)]
+    )
     @pytest.mark.parametrize("mode", ["brief", "normal", "verbose"])
-    def test_console_selection_and_complete_log(self, tmp_path, capsys, mode):
+    def test_console_selection_and_complete_log(
+        self, tmp_path, capsys, mode, width, wrap
+    ):
         """!
         @brief Keep the full log regardless of console detail level.
         @param tmp_path Pytest temporary directory for the sample files and
         artifacts.
         @param capsys Pytest capture used to check the printed Python output.
         @param mode Report mode under test: brief, normal or verbose.
+        @param width Requested width, including unframed output.
+        @param wrap Whether console lines should wrap within the borders.
         """
         with CheckOutput(
-            tmp_path, verbose=mode == "verbose", brief=mode == "brief"
+            tmp_path,
+            verbose=mode == "verbose",
+            brief=mode == "brief",
+            width=width,
+            wrap=wrap,
         ) as output:
             output.detail(
                 "row one\nrow two\nrow three\nrow four",
                 normal="row one\nrow two\nrow three",
             )
+            text = "long-path/" * 40 + "evidence_end"
+            output.detail(text)
             output.result("Example check", False)
             assert output.finish() == 1
         console = capsys.readouterr().out
         assert ("row one" in console) == (mode != "brief")
         assert ("row four" in console) == (mode == "verbose")
-        assert "row four" in output.path.read_text()
-        assert all(len(line) == 120 for line in console.splitlines())
+        log = output.path.read_text()
+        assert "row four" in log
+        assert text in "".join(
+            line[2:-2].rstrip() if line.startswith("|") else line
+            for line in log.splitlines()
+        )
+        assert ("evidence_end" in console) == (
+            mode != "brief" and (wrap or width == 0)
+        )
+        if width and not wrap and mode != "brief":
+            assert "... |" in console
+        if width:
+            assert all(len(line) in (0, width) for line in console.splitlines())
+        else:
+            assert "Example check  [FAIL]" in console
+            assert not console.startswith("+")
+
+    @pytest.mark.parametrize(
+        "configured,override", [(0, None), (160, None), (160, 0)]
+    )
+    def test_run_option_overrides_the_consumer_width(
+        self, tmp_path, monkeypatch, capsys, configured, override
+    ):
+        """!
+        @brief Apply the chosen width before reporting a configuration failure.
+        @param tmp_path Repo whose lint policy deliberately fails validation.
+        @param monkeypatch Skip setup to exercise the report directly.
+        @param capsys Capture the final report from the CLI.
+        @param configured Width in the consuming pyproject.toml.
+        @param override Run-specific width, or None to use configuration.
+        """
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sil-test-quality]\nversion = "0.2.0"\n'
+            f"report-width = {configured}\n"
+            '[tool.ruff.lint]\nignore = ["F401"]\n'
+        )
+        args = ["sil-test-quality"]
+        if override is not None:
+            args += ["--report-width", str(override)]
+        monkeypatch.setattr(cli.sys, "argv", args)
+        monkeypatch.setattr(cli.HookEnvironment, "__init__", lambda *args: None)
+        monkeypatch.setattr(
+            cli.HookEnvironment,
+            "run",
+            lambda self, **kwargs: RepositoryChecks(tmp_path).run(**kwargs),
+        )
+        assert cli.main(tmp_path) == 1
+        console = capsys.readouterr().out
+        width = configured if override is None else override
+        if width:
+            assert all(len(row) in (0, width) for row in console.splitlines())
+        else:
+            assert "Settings  [FAIL]" in console
+        assert "report-width" not in console
 
     @pytest.mark.parametrize(
         "args,brief,verbose",
         [
             ([], False, False),
             (["--brief"], True, False),
-            (["--normal"], False, False),
+            (["--normal", "--wrap"], False, False),
             (["--verbose"], False, True),
             (["-v"], False, True),
         ],
@@ -74,7 +140,15 @@ class TestReportModes:
         )
         monkeypatch.setattr(cli.HookEnvironment, "__init__", lambda *args: None)
         assert cli.main(tmp_path) == 7
-        assert calls == [{"fix": False, "brief": brief, "verbose": verbose}]
+        assert calls == [
+            {
+                "fix": False,
+                "brief": brief,
+                "verbose": verbose,
+                "report_width": None,
+                "wrap": "--wrap" in args,
+            }
+        ]
 
     @pytest.mark.parametrize(
         "args",
@@ -92,10 +166,16 @@ class TestReportModes:
             cli.main()
         assert error.value.code == 2
 
+    @pytest.mark.parametrize(
+        "width", [[], ["--report-width", "0"], ["--report-width=160"]]
+    )
     @pytest.mark.parametrize("mode", ["--brief", "--normal", "--verbose"])
-    def test_git_mode_overrides_local_verbose_setting(self, tmp_path, mode):
+    def test_git_mode_overrides_local_verbose_setting(
+        self, tmp_path, mode, width
+    ):
         """!
         @brief Let explicit hook flags override the local verbose setting.
+        @param width Width arguments supplied to the Git hook.
         @param tmp_path Pytest temporary directory for the sample files and
         artifacts.
         @param mode Report mode under test: brief, normal or verbose.
@@ -120,10 +200,18 @@ class TestReportModes:
             "--",
         ]
         result = subprocess.run(
-            [*command, mode], cwd=tmp_path, capture_output=True, text=True
+            [*command, mode, *width, "--wrap"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
         )
         assert result.returncode == 7
-        assert f"ARGS: ['{mode}']" in result.stdout + result.stderr
+        expected = (
+            [mode]
+            + (["--report-width", width[-1].split("=")[-1]] if width else [])
+            + ["--wrap"]
+        )
+        assert f"ARGS: {expected!r}" in result.stdout + result.stderr
         result = subprocess.run(
             [*command, "--brief", "--verbose"],
             cwd=tmp_path,
@@ -216,7 +304,13 @@ class TestPrecommitCommand:
         assert cli.main(tmp_path) == 1
         assert calls == [
             selected.resolve(),
-            {"fix": True, "verbose": True, "brief": False},
+            {
+                "fix": True,
+                "verbose": True,
+                "brief": False,
+                "report_width": None,
+                "wrap": False,
+            },
         ]
 
     def test_setup_failure_replaces_old_success_evidence(

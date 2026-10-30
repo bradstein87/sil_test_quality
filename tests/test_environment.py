@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from sil_test_quality import __version__
+from sil_test_quality import environment as setup
 from sil_test_quality.checks import RepositoryChecks
 from sil_test_quality.environment import HookEnvironment
 
@@ -77,12 +78,28 @@ class TestHookEnvironment:
     @brief Check setup, cache reuse and failed-install recovery.
     """
 
+    def test_setup_uses_the_consumer_width(self, hook_project, monkeypatch):
+        """!
+        @brief Apply unframed output during setup as well as the main report.
+        @param hook_project Repo with an explicit unframed report setting.
+        @param monkeypatch Replace package installation with recorded commands.
+        """
+        with (hook_project / "pyproject.toml").open("a") as manifest:
+            manifest.write("report-width = 0\n")
+        environment = HookEnvironment(hook_project)
+        installer = EnvironmentInstaller(environment)
+        monkeypatch.setattr(subprocess, "run", installer.run)
+        environment.prepare()
+        log = (hook_project / "artifacts/precommit-setup.log").read_text()
+        assert log.startswith("Environment  [PASS]") and "+---" not in log
+
     @pytest.mark.parametrize(
         "fix, verbose, brief",
         [(False, False, False), (True, True, False), (False, False, True)],
     )
+    @pytest.mark.parametrize("report_width", [None, 0, 160])
     def test_hook_prepares_its_own_environment_and_reuses_it(
-        self, hook_project, monkeypatch, fix, verbose, brief
+        self, hook_project, monkeypatch, fix, verbose, brief, report_width
     ):
         """!
         @brief Prepare an environment once and reuse it for later checks.
@@ -93,6 +110,7 @@ class TestHookEnvironment:
         @param fix Whether this scenario requests import and formatting repairs.
         @param verbose Full-output flag selected for this test scenario.
         @param brief Verdict-only flag selected for this test scenario.
+        @param report_width Width override forwarded to the checker process.
         """
 
         environment = HookEnvironment(hook_project)
@@ -102,7 +120,9 @@ class TestHookEnvironment:
         installs = [
             command for command in installer.commands if "pip" in command
         ]
-        assert len(installs) == 3
+        assert len(installs) == 2
+        assert "requirements.txt" in installs[0]
+        assert str(environment.shared) in installs[0]
         assert all(
             command[0] == str(environment.python) for command in installs
         )
@@ -118,12 +138,26 @@ class TestHookEnvironment:
 
         installer.commands.clear()
         installer.check_status = 7
-        assert environment.run(fix=fix, verbose=verbose, brief=brief) == 7
+        status = environment.run(
+            fix=fix,
+            verbose=verbose,
+            brief=brief,
+            report_width=report_width,
+            wrap=verbose,
+        )
+        assert status == 7
         assert len(installer.commands) == 1
         assert installer.commands[0][0] == str(environment.python)
         assert ("--fix" in installer.commands[0]) == fix
         assert ("--verbose" in installer.commands[0]) == verbose
         assert ("--brief" in installer.commands[0]) == brief
+        assert ("--wrap" in installer.commands[0]) == verbose
+        assert ("--report-width" in installer.commands[0]) == (
+            report_width is not None
+        )
+        if report_width is not None:
+            index = installer.commands[0].index("--report-width")
+            assert installer.commands[0][index + 1] == str(report_width)
 
     def test_incomplete_setup_stops_checks_and_can_be_retried(
         self, hook_project, monkeypatch
@@ -231,8 +265,16 @@ class TestHookEnvironment:
             "run",
             lambda self, **options: calls.append(options) or 3,
         )
-        assert environment.run(fix=True, verbose=verbose) == 3
-        assert calls == [{"fix": True, "verbose": verbose, "brief": False}]
+        assert environment.run(fix=True, verbose=verbose, wrap=verbose) == 3
+        assert calls == [
+            {
+                "fix": True,
+                "verbose": verbose,
+                "brief": False,
+                "report_width": None,
+                "wrap": verbose,
+            }
+        ]
         assert "Precommit checks using" not in capsys.readouterr().out
 
     def test_loaded_version_must_match_requested_version(self, hook_project):
@@ -244,8 +286,27 @@ class TestHookEnvironment:
         manifest = hook_project / "pyproject.toml"
         manifest.write_text(
             manifest.read_text().replace(
-                f'version = "{__version__}"', 'version = "0.2.0"'
+                f'version = "{__version__}"', 'version = "9.9.9"'
             )
         )
         with pytest.raises(ValueError, match=f"loaded {__version__}"):
             HookEnvironment(hook_project)
+
+    def test_baseline_changes_invalidate_the_environment(
+        self, hook_project, tmp_path, monkeypatch
+    ):
+        """!
+        @brief Refresh the cache when a packaged baseline changes.
+        @param hook_project Repository whose environment is being prepared.
+        @param tmp_path Directory holding an isolated fake checker checkout.
+        @param monkeypatch Point environment discovery at the fake checkout.
+        """
+        package = tmp_path / "checker/src/sil_test_quality"
+        package.mkdir(parents=True)
+        (package.parents[1] / "pyproject.toml").write_text("[project]\n")
+        baseline = package / "baseline.toml"
+        baseline.write_text("[tool.ruff]\nline-length = 80\n")
+        monkeypatch.setattr(setup, "__file__", str(package / "environment.py"))
+        before = HookEnvironment(hook_project).directory
+        baseline.write_text("[tool.ruff]\nline-length = 79\n")
+        assert HookEnvironment(hook_project).directory != before

@@ -93,8 +93,10 @@ class TestProjectSource:
 
         (tmp_path / "allowed.py").write_text("# explanation\n" * 500)
         (tmp_path / "too_long.py").write_text("# explanation\n" * 501)
-        problems = ProjectSource(tmp_path).sizes()
-        assert problems == ["too_long.py: 501 lines (limit is 500)"]
+        assert ProjectSource(tmp_path).sizes() == {
+            "allowed.py": 500,
+            "too_long.py": 501,
+        }
 
     def test_generated_files_and_binary_assets_are_excluded(self, tmp_path):
         """!
@@ -110,7 +112,8 @@ class TestProjectSource:
                 (directory / "pyvenv.cfg").touch()
             (directory / "generated.txt").write_text("line\n" * 501)
         (tmp_path / "image.bin").write_bytes(b"\xff\x00\n" * 501)
-        assert ProjectSource(tmp_path).sizes() == []
+        (tmp_path / "nulls.bin").write_bytes(b"\x00\n" * 501)
+        assert ProjectSource(tmp_path).sizes() == {}
 
     @pytest.mark.parametrize(
         "entry",
@@ -156,7 +159,9 @@ class TestLineWidths:
         path.write_bytes(
             ("x" * 80 + "\r\n" + "x" * 81 + "\r\n\t" + "x" * 77).encode()
         )
-        assert ProjectSource(tmp_path).line_widths() == [
+        findings, widths = ProjectSource(tmp_path).line_widths()
+        assert widths == {f"sample{suffix}": 81}
+        assert findings == [
             f"sample{suffix}:2: 81 columns (limit is 80)",
             f"sample{suffix}:3: 81 columns (limit is 80)",
         ]
@@ -179,7 +184,7 @@ class TestLineWidths:
         @param line Code or documentation that exceeds the shared limit.
         """
         (tmp_path / "sample.py").write_text(line, encoding="utf-8")
-        assert ProjectSource(tmp_path).line_widths() == [
+        assert ProjectSource(tmp_path).line_widths()[0] == [
             f"sample.py:1: {len(line)} columns (limit is 80)"
         ]
 
@@ -190,7 +195,7 @@ class TestLineWidths:
         """
         (tmp_path / "a.py").write_text("x" * 81 + "\n" + "x" * 110)
         (tmp_path / "z.py").write_text("x" * 90)
-        assert ProjectSource(tmp_path).line_widths() == [
+        assert ProjectSource(tmp_path).line_widths()[0] == [
             "a.py:2: 110 columns (limit is 80)",
             "z.py:1: 90 columns (limit is 80)",
             "a.py:1: 81 columns (limit is 80)",
@@ -210,9 +215,9 @@ class TestLineWidths:
             (directory / "generated.py").write_text("x" * 81)
         (root / "src/legacy/old_tool.py").write_text("x" * 81)
         (root / "README.md").write_text("x" * 81)
-        assert ProjectSource(root).line_widths() == []
+        assert ProjectSource(root).line_widths()[0] == []
         (root / "tools/helper.py").write_text("x" * 81)
-        assert ProjectSource(root).line_widths() == [
+        assert ProjectSource(root).line_widths()[0] == [
             "tools/helper.py:1: 81 columns (limit is 80)"
         ]
 
@@ -224,7 +229,8 @@ class TestLineWidths:
         @param content Invalid encoded bytes or an unsupported encoding header.
         """
         (tmp_path / "sample.py").write_bytes(content)
-        findings = ProjectSource(tmp_path).line_widths()
+        findings, widths = ProjectSource(tmp_path).line_widths()
+        assert widths == {}
         assert len(findings) == 1
         assert findings[0].startswith("sample.py:1: cannot measure lines:")
 
@@ -236,7 +242,7 @@ class TestLineWidths:
         (tmp_path / "sample.py").write_bytes(
             b"# coding: latin-1\n#" + b"\xe9" * 79
         )
-        assert ProjectSource(tmp_path).line_widths() == []
+        assert ProjectSource(tmp_path).line_widths() == ([], {"sample.py": 80})
 
 
 class TestSourceStructure:
@@ -258,7 +264,9 @@ class TestSourceStructure:
             "def large():\n" + "    value = 1\n" * 61
         )
         (tmp_path / "syntax.py").write_text("def broken(\n")
-        (tmp_path / "suppressed.py").write_text("import os  # noqa: F401\n")
+        (tmp_path / "suppressed.py").write_text(
+            "import os  # noqa: F401\n# mypy: ignore-errors\n"
+        )
         generated = tmp_path / "custom-environment"
         generated.mkdir()
         (generated / "pyvenv.cfg").touch()
@@ -268,4 +276,7 @@ class TestSourceStructure:
         assert any("multiple inheritance" in error for error in errors)
         assert any("unfinished work comment" in error for error in errors)
         assert any("cannot inspect" in error for error in errors)
-        assert suppressions == ["suppressed.py:1: # noqa: F401"]
+        assert suppressions == [
+            "suppressed.py:1: # noqa: F401",
+            "suppressed.py:2: # mypy: ignore-errors",
+        ]

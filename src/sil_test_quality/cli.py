@@ -38,6 +38,16 @@ class QualityCommand(click.Command):
                 click.Option(["--brief"], is_flag=True),
                 click.Option(["--normal"], is_flag=True),
                 click.Option(["--fix"], is_flag=True),
+                click.Option(
+                    ["--wrap"],
+                    is_flag=True,
+                    help="Wrap long console lines instead of clipping them.",
+                ),
+                click.Option(
+                    ["--report-width"],
+                    type=click.IntRange(min=0),
+                    help="Override report columns. Use 0 for unframed output.",
+                ),
             ],
             callback=self.execute,
             help=HELP_DESCRIPTION,
@@ -45,7 +55,14 @@ class QualityCommand(click.Command):
         )
 
     def execute(
-        self, root: Path, verbose: bool, brief: bool, normal: bool, fix: bool
+        self,
+        root: Path,
+        verbose: bool,
+        brief: bool,
+        normal: bool,
+        fix: bool,
+        report_width: int | None = None,
+        wrap: bool = False,
     ) -> int:
         """!
         @brief Run checks using the selected report mode.
@@ -56,6 +73,8 @@ class QualityCommand(click.Command):
         @param brief Show verdicts and final warnings only.
         @param normal Select the default report with truncated evidence.
         @param fix Repair imports and formatting before checking.
+        @param report_width Run-specific width, or None to use the repo setting.
+        @param wrap Wrap long console lines instead of clipping them.
         @return Check exit status, or one if setup or execution fails.
         @throws click.UsageError More than one report mode was selected.
         """
@@ -66,7 +85,11 @@ class QualityCommand(click.Command):
         root = root.resolve()
         try:
             return HookEnvironment(root).run(
-                fix=fix, verbose=verbose, brief=brief
+                fix=fix,
+                verbose=verbose,
+                brief=brief,
+                report_width=report_width,
+                wrap=wrap,
             )
         except (
             OSError,

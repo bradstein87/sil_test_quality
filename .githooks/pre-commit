@@ -2,10 +2,28 @@
 set -eu
 
 quality_fix=false
+quality_wrap=false
 quality_mode=
-for quality_argument in "$@"; do
+quality_width=
+quality_width_set=false
+while [ "$#" -gt 0 ]; do
+    quality_argument=$1
     case "$quality_argument" in
         --fix) quality_fix=true ;;
+        --wrap) quality_wrap=true ;;
+        --report-width)
+            if [ "$#" -lt 2 ]; then
+                echo "--report-width requires a value" >&2
+                exit 2
+            fi
+            quality_width=$2
+            quality_width_set=true
+            shift
+            ;;
+        --report-width=*)
+            quality_width=${quality_argument#*=}
+            quality_width_set=true
+            ;;
         -v|--verbose|--brief|--normal)
             if [ -n "$quality_mode" ]; then
                 echo "Choose one report mode: --brief, --normal, or --verbose" >&2
@@ -18,6 +36,8 @@ for quality_argument in "$@"; do
             ;;
         -h|--help)
             echo "Usage: git hook run pre-commit -- [--fix] [--brief | --normal | --verbose]"
+            echo "       [--report-width COLUMNS] (0 for unframed output)"
+            echo "       [--wrap] (wrap long lines instead of clipping)"
             exit 0
             ;;
         *)
@@ -25,6 +45,7 @@ for quality_argument in "$@"; do
             exit 2
             ;;
     esac
+    shift
 done
 
 set --
@@ -67,5 +88,11 @@ if [ "$quality_fix" = true ]; then
 fi
 if [ -n "$quality_mode" ]; then
     set -- "$@" "$quality_mode"
+fi
+if [ "$quality_width_set" = true ]; then
+    set -- "$@" --report-width "$quality_width"
+fi
+if [ "$quality_wrap" = true ]; then
+    set -- "$@" --wrap
 fi
 exec "$@"
